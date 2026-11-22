@@ -1,0 +1,263 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+buildscript {
+    ext {
+        opensearch_group = "org.opensearch"
+        opensearch_version = System.getProperty("opensearch.version", "3.9.0-SNAPSHOT")
+        isSnapshot = "true" == System.getProperty("build.snapshot", "true")
+        buildVersionQualifier = System.getProperty("build.version_qualifier", "")
+        kotlin_version = System.getProperty("kotlin.version", "2.2.20")
+    }
+
+    repositories {
+        mavenLocal()
+        maven { url = "https://ci.opensearch.org/maven2/" }
+        maven { url = "https://ci.opensearch.org/m2/" }
+        mavenCentral()
+        maven { url = "https://plugins.gradle.org/m2/" }
+        maven { url = "https://ci.opensearch.org/ci/dbc/snapshots/maven/" }
+    }
+
+    dependencies {
+        classpath "${opensearch_group}.gradle:build-tools:${opensearch_version}"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:${kotlin_version}"
+        classpath "org.jetbrains.kotlin:kotlin-allopen:${kotlin_version}"
+//        classpath "io.gitlab.arturbosch.detekt:detekt-gradle-plugin:1.20.0-RC1"
+    }
+}
+
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'com.diffplug.spotless' version '8.10.1'
+}
+
+repositories {
+    mavenLocal()
+    maven { url = "https://ci.opensearch.org/maven2/" }
+    maven { url = "https://ci.opensearch.org/m2/" }
+    mavenCentral()
+    maven { url = "https://plugins.gradle.org/m2/" }
+    maven { url = "https://ci.opensearch.org/ci/dbc/snapshots/maven/" }
+}
+
+allprojects {
+    group = 'org.opensearch.commons'
+    version = opensearch_version.tokenize('-')[0] + '.0'
+    if (buildVersionQualifier) {
+        version += "-${buildVersionQualifier}"
+    }
+    if (isSnapshot) {
+        version += "-SNAPSHOT"
+    }
+}
+
+java {
+    targetCompatibility = JavaVersion.VERSION_21
+    sourceCompatibility = JavaVersion.VERSION_21
+}
+
+apply plugin: 'java'
+apply plugin: 'jacoco'
+apply plugin: 'signing'
+apply plugin: 'maven-publish'
+apply plugin: 'com.gradleup.shadow'
+// apply plugin: 'io.gitlab.arturbosch.detekt'
+apply plugin: 'org.jetbrains.kotlin.jvm'
+apply plugin: 'org.jetbrains.kotlin.plugin.allopen'
+apply plugin: 'opensearch.repositories'
+apply from: 'build-tools/opensearchplugin-coverage.gradle'
+apply plugin: 'opensearch.java-agent'
+
+configurations {
+    all {
+        resolutionStrategy {
+            force "commons-beanutils:commons-beanutils:1.11.0"
+            force "org.bouncycastle:bcpkix-jdk18on:1.86"
+            force "org.bouncycastle:bcpg-jdk18on:1.86"
+            force "org.bouncycastle:bcprov-jdk18on:1.86"
+            force "org.bouncycastle:bcutil-jdk18on:1.86"
+            force "io.opentelemetry:opentelemetry-api:1.62.0"
+            force "io.opentelemetry:opentelemetry-context:1.62.0"
+        }
+    }
+    ktlint {
+      resolutionStrategy {
+          force "ch.qos.logback:logback-classic:1.5.32"
+          force "ch.qos.logback:logback-core:1.5.32"
+      }
+   }
+}
+
+dependencies {
+    compileOnly "org.opensearch.client:opensearch-rest-high-level-client:${opensearch_version}"
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib:${kotlin_version}"
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib-common:${kotlin_version}"
+    compileOnly "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.4.3" // ${kotlin_version} does not work for coroutines
+    compileOnly "com.cronutils:cron-utils:9.2.1"
+    compileOnly "commons-validator:commons-validator:1.7"
+    testImplementation "org.opensearch.test:framework:${opensearch_version}"
+    testImplementation "org.jetbrains.kotlin:kotlin-test:${kotlin_version}"
+    testImplementation "org.mockito:mockito-core:3.10.0"
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.11.4'
+    testImplementation 'org.mockito:mockito-junit-jupiter:3.10.0'
+    testImplementation "com.nhaarman.mockitokotlin2:mockito-kotlin:2.2.0"
+    testImplementation "com.cronutils:cron-utils:9.2.1"
+    testImplementation "commons-validator:commons-validator:1.7"
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.11.4'
+
+    ktlint "com.pinterest:ktlint:0.47.1"
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        exceptionFormat = "full"
+        events "skipped", "passed", "failed" // "started"
+        showStandardStreams = true
+    }
+}
+
+// Only wire the Eclipse JDT step when a spotless task is actually being run, so non-spotless
+// Gradle invocations (test, assemble) don't provision the formatter at configuration time.
+def runningSpotlessTask = gradle.startParameter.taskNames.any { it.toLowerCase(Locale.ROOT).contains('spotless') }
+
+spotless {
+    java {
+        removeUnusedImports()
+        importOrder 'java', 'javax', 'org', 'com'
+        licenseHeaderFile 'spotless.license.java'
+
+        // Pin 4.29 explicitly: spotless 8.10.0+ ships an embedded lockfile for it, so the
+        // formatter resolves from Maven Central through the mirror below instead of querying a
+        // P2 update site at configuration time. Keep withP2Mirrors so any non-lockfile fallback
+        // still hits the ci.opensearch.org mirror rather than the eclipse.org origin.
+        if (runningSpotlessTask) {
+            eclipse('4.29').withP2Mirrors(Map.of("https://download.eclipse.org/", "https://ci.opensearch.org/")).configFile rootProject.file('.eclipseformat.xml')
+        }
+    }
+}
+
+// TODO: enable detekt only when snakeyaml vulnerability is fixed
+/*detekt {
+    config = files("detekt.yml")
+    buildUponDefaultConfig = true
+}*/
+
+tasks.register('ktlint', JavaExec) {
+    description = "Check Kotlin code style."
+    mainClass = "com.pinterest.ktlint.Main"
+    classpath = configurations.ktlint
+    args "src/**/*.kt"
+    // to generate report in checkstyle format prepend following args:
+    // "--reporter=plain", "--reporter=checkstyle,output=${buildDir}/ktlint.xml"
+    // see https://github.com/pinterest/ktlint#usage for more
+}
+
+check.dependsOn ktlint
+
+tasks.register('ktlintFormat', JavaExec) {
+    description = "Fix Kotlin code style deviations."
+    classpath = configurations.ktlint
+    // https://github.com/pinterest/ktlint/issues/1391#issuecomment-1251287020
+    jvmArgs "--add-opens=java.base/java.lang=ALL-UNNAMED"
+    setProperty("mainClass", "com.pinterest.ktlint.Main")
+    args "-F", "src/**/*.kt"
+}
+
+compileKotlin {
+    kotlinOptions {
+        freeCompilerArgs = ['-Xjsr305=strict']
+        jvmTarget = "21"
+    }
+}
+
+compileTestKotlin {
+    kotlinOptions {
+        jvmTarget = "21"
+    }
+}
+
+shadowJar {
+    archiveClassifier = null
+}
+
+task sourcesJar(type: Jar) {
+    archiveClassifier = 'sources'
+    from sourceSets.main.allJava
+}
+
+task javadocJar(type: Jar) {
+    archiveClassifier = 'javadoc'
+    from javadoc.destinationDir
+}
+publishing {
+    repositories {
+        maven {
+            name = 'staging'
+            url = "${rootProject.buildDir}/local-staging-repo"
+        }
+        maven {
+            name = "Snapshots"
+            url = System.getenv("MAVEN_SNAPSHOTS_S3_REPO")
+            credentials(AwsCredentials) {
+                accessKey = System.getenv("AWS_ACCESS_KEY_ID")
+                secretKey = System.getenv("AWS_SECRET_ACCESS_KEY")
+                sessionToken = System.getenv("AWS_SESSION_TOKEN")
+            }
+        }
+    }
+    publications {
+        shadow(MavenPublication) {
+            from components.shadow
+            groupId = 'org.opensearch'
+            artifactId = 'common-utils'
+
+            artifact sourcesJar
+            artifact javadocJar
+
+            pom {
+                name = "OpenSearch Common Utils"
+                packaging = "jar"
+                url = "https://github.com/opensearch-project/common-utils"
+                description = "OpenSearch Common Utils"
+                scm {
+                    connection = "scm:git@github.com:opensearch-project/common-utils.git"
+                    developerConnection = "scm:git@github.com:opensearch-project/common-utils.git"
+                    url = "git@github.com:opensearch-project/common-utils.git"
+                }
+                licenses {
+                    license {
+                        name = "The Apache License, Version 2.0"
+                        url = "http://www.apache.org/licenses/LICENSE-2.0.txt"
+                    }
+                }
+                developers {
+                    developer {
+                        id = "amazonwebservices"
+                        organization = "Amazon Web Services"
+                        organizationUrl = "https://aws.amazon.com"
+                    }
+                }
+            }
+        }
+    }
+
+    gradle.startParameter.setShowStacktrace(ShowStacktrace.ALWAYS)
+    gradle.startParameter.setLogLevel(LogLevel.DEBUG)
+}
+
+// updateVersion: Task to auto increment to the next development iteration
+task updateVersion {
+    onlyIf { System.getProperty('newVersion') }
+    doLast {
+        ext.newVersion = System.getProperty('newVersion')
+        println "Setting version to ${newVersion}."
+        // String tokenization to support -SNAPSHOT
+        // Include the required files that needs to be updated with new Version
+        ant.replaceregexp(file:'build.gradle', match: '"opensearch.version", "\\d.*"', replace: '"opensearch.version", "' + newVersion.tokenize('-')[0] + '-SNAPSHOT"', flags:'g', byline:true)
+    }
+}

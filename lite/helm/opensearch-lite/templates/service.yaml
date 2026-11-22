@@ -1,0 +1,31 @@
+# For clients: the REST API, on ready nodes only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "osl.fullname" . }}
+  labels: {{- include "osl.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector: {{- include "osl.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+---
+# For the nodes: a stable DNS name per pod, and how they find each other.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "osl.fullname" . }}-nodes
+  labels: {{- include "osl.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {{- include "osl.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: transport
+      port: 9300
+      targetPort: transport

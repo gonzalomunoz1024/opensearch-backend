@@ -1,0 +1,143 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.sql.plugin.config;
+
+import java.util.List;
+import lombok.RequiredArgsConstructor;
+import org.opensearch.common.inject.AbstractModule;
+import org.opensearch.common.inject.Provides;
+import org.opensearch.common.inject.Singleton;
+import org.opensearch.sql.analysis.Analyzer;
+import org.opensearch.sql.analysis.ExpressionAnalyzer;
+import org.opensearch.sql.common.setting.Settings;
+import org.opensearch.sql.datasource.DataSourceService;
+import org.opensearch.sql.executor.DelegatingExecutionEngine;
+import org.opensearch.sql.executor.ExecutionDispatcher;
+import org.opensearch.sql.executor.ExecutionEngine;
+import org.opensearch.sql.executor.QueryManager;
+import org.opensearch.sql.executor.QueryService;
+import org.opensearch.sql.executor.execution.QueryPlanFactory;
+import org.opensearch.sql.executor.pagination.PlanSerializer;
+import org.opensearch.sql.expression.function.BuiltinFunctionRepository;
+import org.opensearch.sql.monitor.ResourceMonitor;
+import org.opensearch.sql.opensearch.client.OpenSearchClient;
+import org.opensearch.sql.opensearch.client.OpenSearchNodeClient;
+import org.opensearch.sql.opensearch.executor.OpenSearchExecutionEngine;
+import org.opensearch.sql.opensearch.executor.OpenSearchQueryManager;
+import org.opensearch.sql.opensearch.executor.ThreadPoolExecutionDispatcher;
+import org.opensearch.sql.opensearch.executor.protector.ExecutionProtector;
+import org.opensearch.sql.opensearch.executor.protector.OpenSearchExecutionProtector;
+import org.opensearch.sql.opensearch.monitor.OpenSearchMemoryHealthy;
+import org.opensearch.sql.opensearch.monitor.OpenSearchResourceMonitor;
+import org.opensearch.sql.opensearch.storage.OpenSearchStorageEngine;
+import org.opensearch.sql.planner.Planner;
+import org.opensearch.sql.planner.optimizer.LogicalPlanOptimizer;
+import org.opensearch.sql.ppl.PPLService;
+import org.opensearch.sql.ppl.antlr.PPLSyntaxParser;
+import org.opensearch.sql.sql.SQLService;
+import org.opensearch.sql.sql.antlr.SQLSyntaxParser;
+import org.opensearch.sql.storage.StorageEngine;
+import org.opensearch.telemetry.tracing.Tracer;
+import org.opensearch.telemetry.tracing.noop.NoopTracer;
+import org.opensearch.transport.client.node.NodeClient;
+
+@RequiredArgsConstructor
+public class OpenSearchPluginModule extends AbstractModule {
+
+  private final List<ExecutionEngine> executionEngineExtensions;
+  private final Tracer tracer;
+
+  /** Default constructor for when no engines are available. */
+  public OpenSearchPluginModule() {
+    this(List.of(), NoopTracer.INSTANCE);
+  }
+
+  private final BuiltinFunctionRepository functionRepository =
+      BuiltinFunctionRepository.getInstance();
+
+  @Override
+  protected void configure() {}
+
+  @Provides
+  public OpenSearchClient openSearchClient(NodeClient nodeClient) {
+    return new OpenSearchNodeClient(nodeClient);
+  }
+
+  @Provides
+  public StorageEngine storageEngine(OpenSearchClient client, Settings settings) {
+    return new OpenSearchStorageEngine(client, settings);
+  }
+
+  @Provides
+  @Singleton
+  public ExecutionEngine executionEngine(
+      OpenSearchClient client, ExecutionProtector protector, PlanSerializer planSerializer) {
+    ExecutionEngine defaultEngine =
+        new OpenSearchExecutionEngine(client, protector, planSerializer);
+    if (executionEngineExtensions.isEmpty()) {
+      return defaultEngine;
+    }
+    return new DelegatingExecutionEngine(defaultEngine, executionEngineExtensions);
+  }
+
+  @Provides
+  public ResourceMonitor resourceMonitor(Settings settings) {
+    return new OpenSearchResourceMonitor(settings, new OpenSearchMemoryHealthy(settings));
+  }
+
+  @Provides
+  public ExecutionProtector protector(ResourceMonitor resourceMonitor) {
+    return new OpenSearchExecutionProtector(resourceMonitor);
+  }
+
+  @Provides
+  public PlanSerializer planSerializer(StorageEngine storageEngine, Settings settings) {
+    return new PlanSerializer(storageEngine, settings);
+  }
+
+  @Provides
+  @Singleton
+  public QueryManager queryManager(NodeClient nodeClient, Settings settings) {
+    return new OpenSearchQueryManager(nodeClient, settings);
+  }
+
+  @Provides
+  public PPLService pplService(
+      QueryManager queryManager, QueryPlanFactory queryPlanFactory, Settings settings) {
+    return new PPLService(new PPLSyntaxParser(), queryManager, queryPlanFactory, settings);
+  }
+
+  @Provides
+  public SQLService sqlService(
+      QueryManager queryManager, QueryPlanFactory queryPlanFactory, Settings settings) {
+    return new SQLService(new SQLSyntaxParser(), queryManager, queryPlanFactory, settings);
+  }
+
+  @Provides
+  @Singleton
+  public Tracer tracer() {
+    return tracer;
+  }
+
+  /** {@link QueryPlanFactory}. */
+  @Provides
+  public QueryPlanFactory queryPlanFactory(
+      DataSourceService dataSourceService,
+      ExecutionEngine executionEngine,
+      Settings settings,
+      NodeClient nodeClient) {
+    Analyzer analyzer =
+        new Analyzer(
+            new ExpressionAnalyzer(functionRepository), dataSourceService, functionRepository);
+    Planner planner = new Planner(LogicalPlanOptimizer.create(), settings);
+    ExecutionDispatcher executionDispatcher =
+        new ThreadPoolExecutionDispatcher(nodeClient.threadPool(), settings);
+    QueryService queryService =
+        new QueryService(
+            analyzer, executionEngine, planner, dataSourceService, settings, executionDispatcher);
+    return new QueryPlanFactory(queryService);
+  }
+}

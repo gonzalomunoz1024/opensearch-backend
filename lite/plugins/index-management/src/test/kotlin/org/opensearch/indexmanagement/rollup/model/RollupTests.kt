@@ -1,0 +1,153 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.indexmanagement.rollup.model
+
+import org.opensearch.common.settings.Settings
+import org.opensearch.common.settings.SettingsException
+import org.opensearch.indexmanagement.randomInstant
+import org.opensearch.indexmanagement.randomSchedule
+import org.opensearch.indexmanagement.rollup.randomDateHistogram
+import org.opensearch.indexmanagement.rollup.randomRollup
+import org.opensearch.indexmanagement.rollup.randomTerms
+import org.opensearch.test.OpenSearchTestCase
+import kotlin.test.assertFailsWith
+
+class RollupTests : OpenSearchTestCase() {
+    fun `test rollup same indices`() {
+        assertFailsWith(IllegalArgumentException::class, "Your source and target index cannot be the same") {
+            randomRollup().copy(sourceIndex = "the_same", targetIndex = "the_same")
+        }
+    }
+
+    fun `test rollup requires precisely one date histogram`() {
+        assertFailsWith(IllegalArgumentException::class, "Must specify precisely one date histogram dimension") {
+            randomRollup().copy(dimensions = listOf(randomTerms()))
+        }
+
+        assertFailsWith(IllegalArgumentException::class, "Must specify precisely one date histogram dimension") {
+            randomRollup().copy(dimensions = emptyList())
+        }
+
+        assertFailsWith(IllegalArgumentException::class, "Must specify precisely one date histogram dimension") {
+            randomRollup().copy(dimensions = listOf(randomDateHistogram(), randomDateHistogram()))
+        }
+    }
+
+    fun `test rollup requires first dimension to be date histogram`() {
+        assertFailsWith(IllegalArgumentException::class, "The first dimension must be a date histogram") {
+            randomRollup().copy(dimensions = listOf(randomTerms(), randomDateHistogram()))
+        }
+    }
+
+    fun `test rollup requires job enabled time if its enabled`() {
+        assertFailsWith(IllegalArgumentException::class, "Job enabled time must be present if the job is enabled") {
+            randomRollup().copy(enabled = true, jobEnabledTime = null)
+        }
+    }
+
+    fun `test rollup requires no job enabled time if its disabled`() {
+        assertFailsWith(IllegalArgumentException::class, "Job enabled time must not be present if the job is disabled") {
+            randomRollup().copy(enabled = false, jobEnabledTime = randomInstant())
+        }
+    }
+
+    fun `test rollup requires correct target index settings`() {
+        assertFailsWith(SettingsException::class, "Unknown property was `index.codec1`") {
+            randomRollup().copy(targetIndexSettings = Settings.builder().put("index.codec1", "zlib").build())
+        }
+    }
+
+    fun `test rollup with single setting in target index settings`() {
+        val sb = Settings.builder()
+        sb.put("index.codec", "zlib")
+        randomRollup().copy(targetIndexSettings = sb.build())
+    }
+
+    fun `test rollup with multiple setting in target index settings`() {
+        val sb = Settings.builder()
+        sb.put("index.number_of_replicas", 1)
+        sb.put("index.codec", "zlib")
+        sb.put("index.soft_deletes.retention_lease.period", "1h")
+        randomRollup().copy(targetIndexSettings = sb.build())
+    }
+
+    fun `test rollup requires page size to be between 1 and 10k`() {
+        assertFailsWith(IllegalArgumentException::class, "Page size was negative") {
+            randomRollup().copy(pageSize = -1)
+        }
+
+        assertFailsWith(IllegalArgumentException::class, "Page size was zero") {
+            randomRollup().copy(pageSize = 0)
+        }
+
+        assertFailsWith(IllegalArgumentException::class, "Page size was 10,0001") {
+            randomRollup().copy(pageSize = 10001)
+        }
+
+        // These should successfully parse without exceptions
+        randomRollup().copy(pageSize = 1)
+        randomRollup().copy(pageSize = 10000)
+        randomRollup().copy(pageSize = 345)
+    }
+
+    fun `test rollup requires delay greater or equal than 0 if set`() {
+        assertFailsWith(IllegalArgumentException::class, "Delay was negative") {
+            randomRollup().copy(delay = -1)
+        }
+        assertFailsWith(IllegalArgumentException::class, "Delay was too high") {
+            randomRollup().copy(delay = Long.MAX_VALUE)
+        }
+
+        // These should successfully parse without exceptions
+        randomRollup().copy(delay = 0)
+        randomRollup().copy(delay = 930490)
+        randomRollup().copy(delay = null)
+    }
+
+    fun `test delay applies to continuous rollups only`() {
+        // Continuous rollup schedule matches delay
+        val newDelay: Long = 500
+        val continuousRollup =
+            randomRollup().copy(
+                delay = newDelay,
+                continuous = true,
+            )
+        assertEquals(newDelay, continuousRollup.jobSchedule.delay)
+        // Non continuous rollup schedule should have null delay
+        val nonContinuousRollup =
+            randomRollup().copy(
+                jobSchedule = randomSchedule(),
+                delay = newDelay,
+                continuous = false,
+            )
+        assertNull(nonContinuousRollup.jobSchedule.delay)
+    }
+
+    fun `test rollup routing field must match a terms dimension`() {
+        assertFailsWith(IllegalArgumentException::class, "Routing field must match a terms dimension") {
+            randomRollup().copy(routingField = "nonexistent_field")
+        }
+    }
+
+    fun `test rollup routing field cannot be a date histogram dimension`() {
+        val dimensions = listOf(randomDateHistogram(), randomTerms())
+        assertFailsWith(IllegalArgumentException::class, "Routing field must match a terms dimension") {
+            randomRollup().copy(dimensions = dimensions, routingField = dimensions[0].sourceField)
+        }
+    }
+
+    fun `test rollup routing field accepts valid terms dimension`() {
+        val terms = randomTerms()
+        val dimensions = listOf(randomDateHistogram(), terms)
+        // Should not throw
+        randomRollup().copy(dimensions = dimensions, routingField = terms.sourceField)
+    }
+
+    fun `test rollup routing field accepts null`() {
+        // Should not throw
+        randomRollup().copy(routingField = null)
+    }
+}

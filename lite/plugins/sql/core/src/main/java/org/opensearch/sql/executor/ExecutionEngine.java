@@ -1,0 +1,184 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.sql.executor;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.RequiredArgsConstructor;
+import lombok.ToString;
+import org.apache.calcite.rel.RelNode;
+import org.opensearch.analytics.exec.profile.QueryProfile;
+import org.opensearch.sql.ast.statement.ExplainMode;
+import org.opensearch.sql.calcite.CalcitePlanContext;
+import org.opensearch.sql.common.response.ResponseListener;
+import org.opensearch.sql.data.model.ExprValue;
+import org.opensearch.sql.data.type.ExprType;
+import org.opensearch.sql.executor.pagination.Cursor;
+import org.opensearch.sql.planner.physical.PhysicalPlan;
+import org.opensearch.sql.protocol.response.format.Format;
+
+/** Execution engine that encapsulates execution details. */
+public interface ExecutionEngine {
+
+  /**
+   * Execute physical plan and call back response listener.<br>
+   * Todo. deprecated this interface after finalize {@link ExecutionContext}.
+   *
+   * @param plan executable physical plan
+   * @param listener response listener
+   */
+  void execute(PhysicalPlan plan, ResponseListener<QueryResponse> listener);
+
+  /** Execute physical plan with {@link ExecutionContext} and call back response listener. */
+  void execute(
+      PhysicalPlan plan, ExecutionContext context, ResponseListener<QueryResponse> listener);
+
+  /**
+   * Explain physical plan and call back response listener. The reason why this has to be part of
+   * execution engine interface is that the physical plan probably needs to be executed to get more
+   * info for profiling, such as actual execution time, rows fetched etc.
+   *
+   * @param plan physical plan to explain
+   * @param listener response listener
+   */
+  void explain(PhysicalPlan plan, ResponseListener<ExplainResponse> listener);
+
+  /**
+   * Check if this engine supports vectorized execution of the given Calcite RelNode plan.
+   * Vectorized execution engines (e.g. Velox) override this to advertise support for specific plan
+   * shapes. The default returns {@code false}.
+   */
+  default boolean canVectorize(RelNode plan) {
+    return false;
+  }
+
+  /** Execute calcite RelNode plan with {@link ExecutionContext} and call back response listener. */
+  default void execute(
+      RelNode plan, CalcitePlanContext context, ResponseListener<QueryResponse> listener) {
+    listener.onFailure(
+        new UnsupportedOperationException(
+            getClass().getSimpleName() + " does not support RelNode execution"));
+  }
+
+  default void explain(
+      RelNode plan,
+      ExplainMode mode,
+      CalcitePlanContext context,
+      ResponseListener<ExplainResponse> listener) {
+    listener.onFailure(
+        new UnsupportedOperationException(
+            getClass().getSimpleName() + " does not support RelNode explain"));
+  }
+
+  default void explain(
+      RelNode plan,
+      ExplainMode mode,
+      Format format,
+      CalcitePlanContext context,
+      ResponseListener<ExplainResponse> listener) {
+    // Default: ignore format parameter, delegate to old signature for BWC
+    explain(plan, mode, context, listener);
+  }
+
+  /** Data class that encapsulates ExprValue. */
+  @Data
+  class QueryResponse {
+    private final Schema schema;
+    private final List<ExprValue> results;
+    private final Cursor cursor;
+    @lombok.Setter private QueryProfile profile;
+    @lombok.Setter private Throwable error;
+
+    /** Non-fatal notices attached to a successful result; empty for a plain success. */
+    @lombok.Setter private List<Warning> warnings = List.of();
+  }
+
+  @Data
+  class Schema {
+    private final List<Column> columns;
+
+    @Data
+    public static class Column {
+      private final String name;
+      private final String alias;
+      private final ExprType exprType;
+    }
+  }
+
+  /**
+   * Data class that encapsulates explain result. This can help decouple core engine from concrete
+   * explain response format.
+   */
+  @Data
+  class ExplainResponse {
+    private final ExplainResponseNode root;
+    // used in Calcite plan explain
+    private final ExplainResponseNodeV2 calcite;
+
+    public ExplainResponse(ExplainResponseNode root) {
+      this.root = root;
+      this.calcite = null;
+    }
+
+    public ExplainResponse(ExplainResponseNodeV2 calcite) {
+      this.root = null;
+      this.calcite = calcite;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      ExplainResponse that = (ExplainResponse) o;
+      return Objects.equals(root, that.root) || Objects.equals(calcite, that.calcite);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(root, calcite);
+    }
+
+    public static ExplainResponse normalizeLf(ExplainResponse response) {
+      ExecutionEngine.ExplainResponseNodeV2 calcite = response.getCalcite();
+      if (calcite != null) {
+        return new ExplainResponse(
+            new ExecutionEngine.ExplainResponseNodeV2(
+                normalizeLf(calcite.getLogical()),
+                normalizeLf(calcite.getPhysical()),
+                normalizeLf(calcite.getExtended())));
+      }
+      return response;
+    }
+
+    private static String normalizeLf(String value) {
+      return value == null ? null : value.replace("\r\n", "\n");
+    }
+  }
+
+  @AllArgsConstructor
+  @Data
+  @RequiredArgsConstructor
+  class ExplainResponseNode {
+    private final String name;
+    private Map<String, Object> description;
+    private List<ExplainResponseNode> children;
+  }
+
+  @RequiredArgsConstructor
+  @Data
+  @ToString
+  class ExplainResponseNodeV2 {
+    private final String logical;
+    private final String physical;
+    private final String extended;
+    // For json_tree format: parsed JSON objects instead of strings
+    private Object logicalTree;
+    private Object physicalTree;
+  }
+}

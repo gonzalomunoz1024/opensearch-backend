@@ -1,0 +1,60 @@
+name: Multi node test workflow
+# This workflow is triggered on pull requests to main
+on:
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches:
+      - "**"
+
+jobs:
+  Get-CI-Image-Tag:
+    uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@main
+    with:
+      product: opensearch
+
+  multi-node-test:
+    needs: Get-CI-Image-Tag
+    env:
+      TEST_FILTER: ${{ matrix.test_filter }}
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [ism, non-ism]
+        include:
+          - feature: ism
+            test_filter: -PincludeTests="org.opensearch.indexmanagement.indexstatemanagement*"
+          - feature: non-ism
+            test_filter: -PexcludeTests="org.opensearch.indexmanagement.indexstatemanagement*"
+    # This job runs on Linux
+    runs-on: ubuntu-latest
+    container:
+      # using the same image which is used by opensearch-build team to build the OpenSearch Distribution
+      # this image tag is subject to change as more dependencies and updates will arrive over time
+      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
+      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
+
+    steps:
+      - name: Run start commands
+        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
+      # This step uses the setup-java Github action: https://github.com/actions/setup-java
+      - name: Set Up JDK
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin # Temurin is a distribution of adoptium
+          java-version: 21
+      # index-management
+      - name: Checkout Branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Run integration tests with multi node config
+        run: |
+          chown -R 1000:1000 `pwd`
+          su `id -un 1000` -c "./gradlew integTest -PnumNodes=3 ${{ env.TEST_FILTER }}"
+      - name: Upload failed logs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: logs
+          overwrite: 'true'
+          path: build/testclusters/integTest-*/logs/*

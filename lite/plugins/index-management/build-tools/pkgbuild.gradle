@@ -1,0 +1,64 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+apply plugin: 'com.netflix.nebula.ospackage'
+
+// This is afterEvaluate because the bundlePlugin ZIP task is updated afterEvaluate and changes the ZIP name to match the plugin name
+afterEvaluate {
+    ospackage {
+        packageName = "${name}"
+        release = isSnapshot ? "0.1" : '1'
+        version = "${project.version}" - "-SNAPSHOT"
+
+        into '/usr/share/opensearch/plugins'
+        from(zipTree(bundlePlugin.archiveFile)) {
+            into opensearchplugin.name
+        }
+
+        user 'root'
+        permissionGroup 'root'
+        fileMode 0644
+        dirMode 0755
+
+        requires('elasticsearch-oss', versions.elasticsearch, EQUAL)
+        packager = 'Amazon'
+        vendor = 'Amazon'
+        os = 'LINUX'
+        prefix '/usr'
+
+        license 'ASL-2.0'
+        maintainer 'OpenDistro for Elasticsearch Team <opendistro@amazon.com>'
+        url 'https://opensearch.org/downloads.html'
+        summary '''
+         Open Distro for Elasticsearch Index Management.
+         Reference documentation can be found at https://docs-beta.opensearch.org/.
+    '''.stripIndent().replace('\n', ' ').trim()
+    }
+
+    buildRpm {
+        arch = 'NOARCH'
+        dependsOn 'assemble'
+        finalizedBy 'renameRpm'
+        tasks.register("renameRpm", Copy) {
+            from("$buildDir/distributions")
+            into("$buildDir/distributions")
+            include archiveFileName.get()
+            rename archiveFileName.get(), "${packageName}-${version}.rpm"
+            doLast { delete file("$buildDir/distributions/$archiveFileName") }
+        }
+    }
+    buildDeb {
+        arch = 'all'
+        dependsOn 'assemble'
+        finalizedBy 'renameDeb'
+        tasks.register("renameDeb", Copy) {
+            from("$buildDir/distributions")
+            into("$buildDir/distributions")
+            include archiveFileName.get()
+            rename archiveFileName.get(), "${packageName}-${version}.deb"
+            doLast { delete file("$buildDir/distributions/$archiveFileName") }
+        }
+    }
+}

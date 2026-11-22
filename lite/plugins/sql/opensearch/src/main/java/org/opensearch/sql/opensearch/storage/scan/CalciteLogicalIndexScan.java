@@ -1,0 +1,616 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.sql.opensearch.storage.scan;
+
+import com.google.common.collect.ImmutableList;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;
+import lombok.Getter;
+import org.apache.calcite.plan.Convention;
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.plan.RelOptRule;
+import org.apache.calcite.plan.RelOptTable;
+import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.AbstractRelNode;
+import org.apache.calcite.rel.RelCollation;
+import org.apache.calcite.rel.RelCollations;
+import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Aggregate;
+import org.apache.calcite.rel.core.Filter;
+import org.apache.calcite.rel.core.Project;
+import org.apache.calcite.rel.core.Sort;
+import org.apache.calcite.rel.hint.RelHint;
+import org.apache.calcite.rel.logical.LogicalSort;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexVisitorImpl;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.commons.lang3.tuple.Pair;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.search.aggregations.AggregationBuilder;
+import org.opensearch.sql.ast.tree.HighlightConfig;
+import org.opensearch.sql.calcite.CalcitePlanContext;
+import org.opensearch.sql.calcite.plan.HighlightPushDown;
+import org.opensearch.sql.calcite.utils.OpenSearchTypeFactory;
+import org.opensearch.sql.calcite.utils.PPLHintUtils;
+import org.opensearch.sql.common.setting.Settings;
+import org.opensearch.sql.data.type.ExprCoreType;
+import org.opensearch.sql.data.type.ExprType;
+import org.opensearch.sql.expression.HighlightExpression;
+import org.opensearch.sql.opensearch.data.type.OpenSearchDataType;
+import org.opensearch.sql.opensearch.data.type.OpenSearchTextType;
+import org.opensearch.sql.opensearch.mapping.IndexMapping;
+import org.opensearch.sql.opensearch.planner.rules.OpenSearchIndexRules;
+import org.opensearch.sql.opensearch.request.AggregateAnalyzer;
+import org.opensearch.sql.opensearch.request.PredicateAnalyzer;
+import org.opensearch.sql.opensearch.request.PredicateAnalyzer.QueryExpression;
+import org.opensearch.sql.opensearch.response.agg.OpenSearchAggregationResponseParser;
+import org.opensearch.sql.opensearch.storage.OpenSearchIndex;
+import org.opensearch.sql.opensearch.storage.scan.context.AbstractAction;
+import org.opensearch.sql.opensearch.storage.scan.context.AggSpec;
+import org.opensearch.sql.opensearch.storage.scan.context.FilterDigest;
+import org.opensearch.sql.opensearch.storage.scan.context.LimitDigest;
+import org.opensearch.sql.opensearch.storage.scan.context.OSRequestBuilderAction;
+import org.opensearch.sql.opensearch.storage.scan.context.ProjectDigest;
+import org.opensearch.sql.opensearch.storage.scan.context.PushDownContext;
+import org.opensearch.sql.opensearch.storage.scan.context.PushDownType;
+import org.opensearch.sql.opensearch.storage.scan.context.RareTopDigest;
+import org.opensearch.sql.utils.Utils;
+
+/** The logical relational operator representing a scan of an OpenSearchIndex type. */
+@Getter
+public class CalciteLogicalIndexScan extends AbstractCalciteIndexScan implements HighlightPushDown {
+  private static final Logger LOG = LogManager.getLogger(CalciteLogicalIndexScan.class);
+
+  public CalciteLogicalIndexScan(
+      RelOptCluster cluster, RelOptTable table, OpenSearchIndex osIndex) {
+    this(
+        cluster,
+        cluster.traitSetOf(Convention.NONE),
+        ImmutableList.of(),
+        table,
+        osIndex,
+        table.getRowType(),
+        new PushDownContext(osIndex));
+  }
+
+  public RelNode pushDownHighlight(HighlightConfig highlightConfig) {
+    RelDataTypeFactory.Builder schemaBuilder = getCluster().getTypeFactory().builder();
+    schemaBuilder.addAll(getRowType().getFieldList());
+    schemaBuilder.add(
+        HighlightExpression.HIGHLIGHT_FIELD,
+        getCluster().getTypeFactory().createSqlType(SqlTypeName.ANY));
+    CalciteLogicalIndexScan newScan = copyWithNewSchema(schemaBuilder.build());
+    newScan
+        .getPushDownContext()
+        .add(
+            PushDownType.HIGHLIGHT,
+            highlightConfig.fieldNames(),
+            (OSRequestBuilderAction)
+                requestBuilder -> applyHighlightPushDown(requestBuilder, highlightConfig));
+    return newScan;
+  }
+
+  protected CalciteLogicalIndexScan(
+      RelOptCluster cluster,
+      RelTraitSet traitSet,
+      List<RelHint> hints,
+      RelOptTable table,
+      OpenSearchIndex osIndex,
+      RelDataType schema,
+      PushDownContext pushDownContext) {
+    super(cluster, traitSet, hints, table, osIndex, schema, pushDownContext);
+  }
+
+  @Override
+  protected AbstractCalciteIndexScan buildScan(
+      RelOptCluster cluster,
+      RelTraitSet traitSet,
+      List<RelHint> hints,
+      RelOptTable table,
+      OpenSearchIndex osIndex,
+      RelDataType schema,
+      PushDownContext pushDownContext) {
+    return new CalciteLogicalIndexScan(
+        cluster, traitSet, hints, table, osIndex, schema, pushDownContext);
+  }
+
+  @Override
+  public CalciteLogicalIndexScan copy() {
+    return new CalciteLogicalIndexScan(
+        getCluster(), traitSet, hints, table, osIndex, schema, pushDownContext.clone());
+  }
+
+  public CalciteLogicalIndexScan copyWithNewSchema(RelDataType schema) {
+    // Do shallow copy for requestBuilder, thus requestBuilder among different plans produced in the
+    // optimization process won't affect each other.
+    return new CalciteLogicalIndexScan(
+        getCluster(), traitSet, hints, table, osIndex, schema, pushDownContext.clone());
+  }
+
+  public CalciteLogicalIndexScan copyWithNewTraitSet(RelTraitSet traitSet) {
+    return new CalciteLogicalIndexScan(
+        getCluster(), traitSet, hints, table, osIndex, schema, pushDownContext.clone());
+  }
+
+  @Override
+  public void register(RelOptPlanner planner) {
+    super.register(planner);
+    for (RelOptRule rule : OpenSearchIndexRules.OPEN_SEARCH_NON_PUSHDOWN_RULES) {
+      planner.addRule(rule);
+    }
+    if ((Boolean) osIndex.getSettings().getSettingValue(Settings.Key.CALCITE_PUSHDOWN_ENABLED)) {
+      for (RelOptRule rule : OpenSearchIndexRules.OPEN_SEARCH_PUSHDOWN_RULES) {
+        planner.addRule(rule);
+      }
+    }
+  }
+
+  public AbstractRelNode pushDownFilter(Filter filter) {
+    try {
+      RelDataType rowType = this.getRowType();
+      List<String> schema = buildSchema();
+      Map<String, ExprType> fieldTypes = this.osIndex.getAllFieldTypes();
+      QueryExpression queryExpression =
+          PredicateAnalyzer.analyzeExpression(
+              filter.getCondition(), schema, fieldTypes, rowType, getCluster());
+      // TODO: handle the case where condition contains a score function
+      CalciteLogicalIndexScan newScan = this.copy();
+      newScan.pushDownContext.add(
+          queryExpression.getScriptCount() > 0 ? PushDownType.SCRIPT : PushDownType.FILTER,
+          new FilterDigest(
+              queryExpression.getScriptCount(),
+              queryExpression.isPartial()
+                  ? constructCondition(
+                      queryExpression.getAnalyzedNodes(), getCluster().getRexBuilder())
+                  : filter.getCondition()),
+          (OSRequestBuilderAction)
+              requestBuilder -> requestBuilder.pushDownFilterForCalcite(queryExpression.builder()));
+
+      // If the query expression is partial, we need to replace the input of the filter with the
+      // partial pushed scan and the filter condition with non-pushed-down conditions.
+      if (queryExpression.isPartial()) {
+        // Only CompoundQueryExpression could be partial.
+        List<RexNode> conditions = queryExpression.getUnAnalyzableNodes();
+        RexNode newCondition = constructCondition(conditions, getCluster().getRexBuilder());
+        return filter.copy(filter.getTraitSet(), newScan, newCondition);
+      }
+      return newScan;
+    } catch (Exception e) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Cannot pushdown the filter condition.", e);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Build schema for the current scan. Schema is the combination of all index fields and nested
+   * fields in index fields.
+   *
+   * @return All current outputs fields plus nested paths.
+   */
+  private List<String> buildSchema() {
+    List<String> schema = new ArrayList<>(this.getRowType().getFieldNames());
+    // Add nested paths to schema if it has
+    List<String> nestedPaths =
+        schema.stream()
+            .map(field -> Utils.resolveNestedPath(field, this.osIndex.getAllFieldTypes()))
+            .filter(Objects::nonNull)
+            .distinct()
+            .toList();
+    schema.addAll(nestedPaths);
+    return schema;
+  }
+
+  private static RexNode constructCondition(List<RexNode> conditions, RexBuilder rexBuilder) {
+    return conditions.size() > 1
+        ? rexBuilder.makeCall(SqlStdOperatorTable.AND, conditions)
+        : conditions.get(0);
+  }
+
+  public CalciteLogicalIndexScan pushDownCollapse(Project finalOutput, String fieldName) {
+    ExprType fieldType = osIndex.getFieldTypes().get(fieldName);
+    if (fieldType == null) {
+      // the fieldName must be one of index fields
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Cannot pushdown the dedup '{}' due to it is not a index field", fieldName);
+      }
+      return null;
+    }
+    ExprType originalExprType = fieldType.getOriginalExprType();
+    String originalFieldName = originalExprType.getOriginalPath().orElse(fieldName);
+    if (!ExprCoreType.numberTypes().contains(originalExprType)
+        && !originalExprType.legacyTypeName().equals("KEYWORD")
+        && !originalExprType.legacyTypeName().equals("TEXT")) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(
+            "Cannot pushdown the dedup '{}' due to only keyword and number type are accepted, but"
+                + " its type is {}",
+            originalFieldName,
+            originalExprType.legacyTypeName());
+      }
+      return null;
+    }
+    // For text, use its subfield if exists.
+    String field = OpenSearchTextType.toKeywordSubField(originalFieldName, fieldType);
+    if (field == null) {
+      LOG.debug("Cannot pushdown the dedup due to no keyword subfield for {}.", fieldName);
+      return null;
+    }
+    CalciteLogicalIndexScan newScan = this.copyWithNewSchema(finalOutput.getRowType());
+    newScan.pushDownContext.add(
+        PushDownType.AGGREGATION,
+        fieldName,
+        (OSRequestBuilderAction) requestBuilder -> requestBuilder.pushDownCollapse(field));
+    return newScan;
+  }
+
+  /**
+   * When pushing down a project, we need to create a new CalciteLogicalIndexScan with the updated
+   * schema since we cannot override getRowType() which is defined to be final.
+   */
+  public CalciteLogicalIndexScan pushDownProject(List<Integer> selectedColumns) {
+    final RelDataTypeFactory.Builder builder = getCluster().getTypeFactory().builder();
+    final List<RelDataTypeField> fieldList = this.getRowType().getFieldList();
+    for (int project : selectedColumns) {
+      builder.add(fieldList.get(project));
+    }
+    RelDataType newSchema = builder.build();
+
+    // To prevent circular pushdown for some edge cases where plan has pattern(see TPCH Q1):
+    // `Project($1, $0) -> Sort(sort0=[1]) -> Project($1, $0) -> Aggregate(group={0},...)...`
+    // We don't support pushing down the duplicated project here otherwise it will cause dead-loop.
+    // `ProjectMergeRule` will help merge the duplicated projects.
+    if (this.getPushDownContext().containsDigest(newSchema.getFieldNames())) return null;
+
+    // Projection may alter indicies in the collations.
+    // E.g. When sorting age
+    // `Project(age) - TableScan(schema=[name, age], collation=[$1 ASC])` should become
+    // `TableScan(schema=[age], collation=[$0 ASC])` after pushing down project.
+    RelTraitSet traitSetWithReIndexedCollations = reIndexCollations(selectedColumns);
+
+    CalciteLogicalIndexScan newScan =
+        new CalciteLogicalIndexScan(
+            getCluster(),
+            traitSetWithReIndexedCollations,
+            hints,
+            table,
+            osIndex,
+            newSchema,
+            pushDownContext.clone());
+
+    AbstractAction<?> action;
+    if (pushDownContext.isAggregatePushed()) {
+      // For aggregate, we do nothing on query builder but only change the schema of the scan.
+      action = (OSRequestBuilderAction) requestBuilder -> {};
+    } else {
+      action =
+          (OSRequestBuilderAction)
+              requestBuilder ->
+                  requestBuilder.pushDownProjectStream(
+                      newSchema.getFieldNames().stream()
+                          .filter(f -> !HighlightExpression.HIGHLIGHT_FIELD.equals(f)));
+    }
+    newScan.pushDownContext.add(
+        PushDownType.PROJECT,
+        new ProjectDigest(newSchema.getFieldNames(), selectedColumns),
+        action);
+    return newScan;
+  }
+
+  private RelTraitSet reIndexCollations(List<Integer> selectedColumns) {
+    RelTraitSet newTraitSet;
+    RelCollation relCollation = getTraitSet().getCollation();
+    if (!Objects.isNull(relCollation) && !relCollation.getFieldCollations().isEmpty()) {
+      List<RelFieldCollation> newCollations =
+          relCollation.getFieldCollations().stream()
+              .filter(collation -> selectedColumns.contains(collation.getFieldIndex()))
+              .map(
+                  collation ->
+                      collation.withFieldIndex(selectedColumns.indexOf(collation.getFieldIndex())))
+              .collect(Collectors.toList());
+      newTraitSet = getTraitSet().replace(RelCollations.of(newCollations));
+    } else {
+      newTraitSet = getTraitSet();
+    }
+    return newTraitSet;
+  }
+
+  public CalciteLogicalIndexScan pushDownSortAggregateMeasure(Sort sort) {
+    try {
+      AggSpec aggSpec = pushDownContext.getAggSpec();
+      if (aggSpec == null || !aggSpec.isCompositeAggregation()) {
+        return null;
+      }
+      List<String> collationNames = getCollationNames(sort.getCollation().getFieldCollations());
+      if (!isAnyCollationNameInAggregators(collationNames)) {
+        return null;
+      }
+      CalciteLogicalIndexScan newScan = copyWithNewTraitSet(sort.getTraitSet());
+      newScan.pushDownContext.setAggSpec(
+          aggSpec.withSortMeasure(
+              sort.getCollation().getFieldCollations(), rowType.getFieldNames()));
+      AbstractAction<?> action =
+          (OSRequestBuilderAction) requestAction -> requestAction.resetRequestTotal();
+      Object digest = sort.getCollation().getFieldCollations();
+      newScan.pushDownContext.add(PushDownType.SORT_AGG_METRICS, digest, action);
+      return newScan;
+    } catch (Exception e) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Cannot pushdown the sort aggregate {}", sort, e);
+      }
+    }
+    return null;
+  }
+
+  public CalciteLogicalIndexScan pushDownRareTop(Project project, RareTopDigest digest) {
+    try {
+      CalciteLogicalIndexScan newScan = copyWithNewSchema(project.getRowType());
+      newScan.pushDownContext.setAggSpec(pushDownContext.getAggSpec().withRareTop(digest));
+      AbstractAction<?> action =
+          (OSRequestBuilderAction) requestAction -> requestAction.resetRequestTotal();
+      newScan.pushDownContext.add(PushDownType.RARE_TOP, digest, action);
+      return newScan;
+    } catch (Exception e) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Cannot pushdown {}", digest, e);
+      }
+      return null;
+    }
+  }
+
+  public AbstractRelNode pushDownAggregate(Aggregate aggregate, @Nullable Project project) {
+    return pushDownAggregate(aggregate, project, true);
+  }
+
+  /**
+   * @param allowPartialFallback whether the partial-result path may be tried. False when
+   *     re-entering from that path over the narrowed index subset, so it is attempted at most once.
+   */
+  private AbstractRelNode pushDownAggregate(
+      Aggregate aggregate, @Nullable Project project, boolean allowPartialFallback) {
+    try {
+      CalciteLogicalIndexScan newScan =
+          new CalciteLogicalIndexScan(
+              getCluster(),
+              traitSet,
+              hints,
+              table,
+              osIndex,
+              aggregate.getRowType(),
+              pushDownContext.cloneForAggregate(aggregate, project));
+      List<String> schema = buildSchema();
+      Map<String, ExprType> fieldTypes =
+          this.osIndex.getAllFieldTypes().entrySet().stream()
+              .filter(entry -> schema.contains(entry.getKey()))
+              .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+      List<String> outputFields = aggregate.getRowType().getFieldNames();
+      List<String> bucketNames = outputFields.subList(0, aggregate.getGroupSet().cardinality());
+      if (bucketNames.stream()
+          .map(b -> fieldTypes.get(b))
+          .filter(Objects::nonNull)
+          .anyMatch(expr -> expr.getOriginalType() == ExprCoreType.ARRAY)) {
+        // TODO https://github.com/opensearch-project/sql/issues/5006
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Cannot pushdown the aggregate due to bucket contains array (nested) type");
+        }
+        return null;
+      }
+      // Try partial mode before analyze: since #5646 a text/keyword conflict pushes down as a slow
+      // _source script instead of failing, so a post-failure fallback would never fire.
+      if (allowPartialFallback) {
+        List<String> partitionFields = resolvePartitionFields(aggregate, project);
+        if (partitionFields != null) {
+          AbstractRelNode partial = tryPartialResultAggregate(aggregate, project, partitionFields);
+          if (partial != null) {
+            return partial;
+          }
+        }
+      }
+      int queryBucketSize = osIndex.getQueryBucketSize();
+      boolean bucketNullable = !PPLHintUtils.ignoreNullBucket(aggregate);
+      AggregateAnalyzer.AggregateBuilderHelper helper =
+          new AggregateAnalyzer.AggregateBuilderHelper(
+              getRowType(), fieldTypes, getCluster(), bucketNullable, queryBucketSize);
+      final Pair<List<AggregationBuilder>, OpenSearchAggregationResponseParser> builderAndParser =
+          AggregateAnalyzer.analyze(aggregate, project, outputFields, helper);
+      Map<String, OpenSearchDataType> extendedTypeMapping =
+          aggregate.getRowType().getFieldList().stream()
+              .collect(
+                  Collectors.toMap(
+                      RelDataTypeField::getName,
+                      field ->
+                          OpenSearchDataType.of(
+                              OpenSearchTypeFactory.convertRelDataTypeToExprType(
+                                  field.getType()))));
+      AggSpec aggSpec = AggSpec.create(extendedTypeMapping, bucketNames, builderAndParser);
+      // AggPushDownAction is lazily materialized by AggSpec.buildAction() and then this action
+      // will materialize agg request builder.
+      // The AGGREGATION pushdown operation in PushDownContext remains a no-op marker here.
+      newScan.pushDownContext.setAggSpec(aggSpec);
+      newScan.pushDownContext.add(
+          PushDownType.AGGREGATION, aggregate, (OSRequestBuilderAction) requestBuilder -> {});
+      return newScan;
+    } catch (Exception e) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Cannot pushdown the aggregate {}", aggregate, e);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the aggregation's group keys to the underlying scan fields to partition indices on. A
+   * key may be a bare field ({@code ... by city}) or an expression over fields ({@code eval g =
+   * lower(city) | ... by g}); in the latter case we partition on every field the expression reads,
+   * since a kept index must map all of them aggregatably. The {@code project} (when present) sits
+   * directly on the scan, so its input refs index into this scan's row type. Returns {@code null}
+   * if any key is a pure constant with no field to key on.
+   */
+  @Nullable
+  private List<String> resolvePartitionFields(Aggregate aggregate, @Nullable Project project) {
+    List<String> scanFields = getRowType().getFieldNames();
+    List<String> fields = new ArrayList<>();
+    for (int group : aggregate.getGroupSet()) {
+      Set<Integer> refs = new LinkedHashSet<>();
+      if (project == null) {
+        refs.add(group); // group key indexes directly into the scan
+      } else {
+        project
+            .getProjects()
+            .get(group)
+            .accept(
+                new RexVisitorImpl<Void>(true) {
+                  @Override
+                  public Void visitInputRef(RexInputRef ref) {
+                    refs.add(ref.getIndex());
+                    return null;
+                  }
+                });
+      }
+      if (refs.isEmpty()) {
+        return null; // constant group key -> nothing to partition on
+      }
+      for (int ref : refs) {
+        String name = scanFields.get(ref);
+        if (!fields.contains(name)) {
+          fields.add(name);
+        }
+      }
+    }
+    return fields;
+  }
+
+  /**
+   * On a text/keyword mapping conflict, narrow the scan to the index subset where the group field
+   * is aggregatable, push the aggregation over just that subset, and record a warning naming the
+   * excluded indices. Only runs behind the opt-in setting and only when the response format can
+   * carry the warning ({@link CalcitePlanContext#isWarningsSupported}); returns {@code null}
+   * otherwise. {@code partitionFields} are the scan fields the group keys resolve to (see {@link
+   * #resolvePartitionFields}). Partitioning lives in {@link PartialResultAggregatePushdown}.
+   */
+  private AbstractRelNode tryPartialResultAggregate(
+      Aggregate aggregate, @Nullable Project project, List<String> partitionFields) {
+    // The per-request override wins when present; otherwise the cluster setting decides. Both the
+    // override and warnings-support are read from CalcitePlanContext (carried onto the plan), not
+    // Log4j ThreadContext, so they survive the security transport→worker handoff.
+    Boolean override = CalcitePlanContext.getPartialResultOverride();
+    boolean partialResultEnabled =
+        override != null
+            ? override
+            : osIndex
+                .getSettings()
+                .getSettingValue(Settings.Key.PARTIAL_RESULT_ON_MAPPING_CONFLICT);
+    if (!partialResultEnabled) {
+      return null;
+    }
+    // A format with no warnings channel (CSV/RAW/VIZ) must not silently drop indices.
+    if (!CalcitePlanContext.isWarningsSupported()) {
+      return null;
+    }
+    try {
+      Map<String, IndexMapping> mappings = osIndex.getIndexMappings();
+      PartialResultAggregatePushdown.Plan plan =
+          PartialResultAggregatePushdown.plan(partitionFields, mappings);
+      if (plan == null) {
+        return null;
+      }
+
+      OpenSearchIndex narrowedIndex =
+          new OpenSearchIndex(
+              osIndex.getClient(), osIndex.getSettings(), String.join(",", plan.keptIndices()));
+      CalciteLogicalIndexScan narrowedScan =
+          new CalciteLogicalIndexScan(
+              getCluster(),
+              traitSet,
+              hints,
+              table,
+              narrowedIndex,
+              getRowType(),
+              pushDownContext.cloneWithOsIndex(narrowedIndex));
+      // allowPartialFallback=false: the subset is already narrowed, so keep this one-shot.
+      AbstractRelNode pushed = narrowedScan.pushDownAggregate(aggregate, project, false);
+      if (pushed == null) {
+        return null; // narrowed subset still can't push down -> leave un-pushed
+      }
+
+      CalcitePlanContext.addWarning(plan.warning());
+      return pushed;
+    } catch (Exception e) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Cannot apply partial-result aggregate pushdown for {}", aggregate, e);
+      }
+      return null;
+    }
+  }
+
+  public AbstractRelNode pushDownLimit(LogicalSort sort, Integer limit, Integer offset) {
+    try {
+      if (pushDownContext.isAggregatePushed()) {
+        int totalSize = limit + offset;
+        AggSpec aggSpec = pushDownContext.getAggSpec();
+        boolean canReduceEstimatedRowsCount =
+            !pushDownContext.isLimitPushed()
+                || pushDownContext.getQueue().reversed().stream()
+                    .takeWhile(op -> op.type() != PushDownType.AGGREGATION)
+                    .filter(op -> op.type() == PushDownType.LIMIT)
+                    .findFirst()
+                    .map(op -> (LimitDigest) op.digest())
+                    .map(d -> totalSize < d.offset() + d.limit())
+                    .orElse(true);
+        boolean canUpdate =
+            canReduceEstimatedRowsCount || aggSpec.canPushDownLimitIntoBucketSize(totalSize);
+        if (!canUpdate && offset > 0) return null;
+        CalciteLogicalIndexScan newScan = this.copyWithNewSchema(getRowType());
+        if (canUpdate) {
+          newScan.pushDownContext.setAggSpec(aggSpec.withLimit(limit + offset));
+        }
+        AbstractAction action;
+        if (newScan.pushDownContext.getAggSpec().isCompositeAggregation()) {
+          action =
+              (OSRequestBuilderAction)
+                  requestBuilder -> requestBuilder.pushDownLimitToRequestTotal(limit, offset);
+        } else {
+          action = (OSRequestBuilderAction) requestBuilder -> {};
+        }
+        newScan.pushDownContext.add(PushDownType.LIMIT, new LimitDigest(limit, offset), action);
+        return offset > 0 ? sort.copy(sort.getTraitSet(), List.of(newScan)) : newScan;
+      } else {
+        LimitDigest digest = new LimitDigest(limit, offset);
+        if (pushDownContext.containsDigestOnTop(digest)) {
+          // avoid stack overflow
+          return null;
+        }
+        CalciteLogicalIndexScan newScan = this.copyWithNewSchema(getRowType());
+        newScan.pushDownContext.add(
+            PushDownType.LIMIT,
+            digest,
+            (OSRequestBuilderAction) requestBuilder -> requestBuilder.pushDownLimit(limit, offset));
+        return newScan;
+      }
+    } catch (Exception e) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Cannot pushdown limit {} with offset {}", limit, offset, e);
+      }
+    }
+    return null;
+  }
+}

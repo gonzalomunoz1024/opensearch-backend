@@ -1,0 +1,95 @@
+# Builds the OpenSearch Lite image from lite/Dockerfile, checks that it starts and
+# answers searches, SQL and Index Management calls (one node, three nodes, and the Helm
+# chart on a throwaway cluster), and on pushes to the default branch or a lite-* tag
+# pushes the image and the Helm chart to Artifactory.
+#
+# Repository settings it reads (Settings > Secrets and variables > Actions):
+#   vars.ARTIFACTORY_REGISTRY   registry host, e.g. artifactory.example.com
+#   vars.ARTIFACTORY_IMAGE      image path in it, e.g. docker-local/opensearch-lite
+#   vars.ARTIFACTORY_HELM_REPO  OCI path for the chart, e.g. helm-local (optional)
+#   vars.BASE_IMAGE             base image from your registry (optional; default UBI 9 minimal)
+#   vars.RUNNER                 runner label (optional; default ubuntu-latest)
+#   secrets.ARTIFACTORY_USER, secrets.ARTIFACTORY_TOKEN
+# Without the registry settings the workflow builds and tests but pushes nothing.
+
+name: OpenSearch Lite
+
+# Pull requests build and test; main and lite-* tags also publish. Other branches build
+# once they have a pull request, or on request from the Actions tab.
+on:
+  push:
+    branches: [main]
+    tags: ['lite-*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: lite-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 180
+    env:
+      IMAGE: opensearch-lite:ci
+      BASE_IMAGE: ${{ vars.BASE_IMAGE || 'redhat/ubi9-minimal:latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same command your pipeline runs: everything compiles inside the build.
+      - name: Build the image
+        run: >-
+          docker build -f lite/Dockerfile -t "$IMAGE"
+          --build-arg BASE_IMAGE="$BASE_IMAGE" --build-arg GRADLE_RETRIES=3 .
+
+      - name: Smoke test (random UID, no capabilities, like OpenShift's restricted policy)
+        run: lite/smoke_test.sh "$IMAGE"
+
+      - name: Smoke test, three nodes with the chart's cluster settings
+        run: lite/smoke_test.sh --cluster "$IMAGE"
+
+      - name: Lint the Helm chart
+        run: helm lint lite/helm/opensearch-lite
+
+      # GitHub's runners have kind; a self-hosted runner without it skips this step.
+      - name: Install the chart on a throwaway Kubernetes, one node and then three
+        run: |
+          set -euo pipefail
+          if ! command -v kind >/dev/null; then
+            echo "::notice::kind is not on this runner, so the chart was linted but not installed"
+            exit 0
+          fi
+          kind create cluster --name lite --wait 180s
+          kind load docker-image --name lite "$IMAGE"
+          lite/helm_test.sh "$IMAGE"
+          REPLICAS=3 lite/helm_test.sh "$IMAGE"
+          kind delete cluster --name lite
+
+      - name: Push the image and the chart to Artifactory
+        if: >-
+          github.event_name != 'pull_request' && vars.ARTIFACTORY_REGISTRY != '' &&
+          (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/'))
+        env:
+          REGISTRY: ${{ vars.ARTIFACTORY_REGISTRY }}
+          IMAGE_PATH: ${{ vars.ARTIFACTORY_IMAGE }}
+          HELM_REPO: ${{ vars.ARTIFACTORY_HELM_REPO }}
+          ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^opensearch *= *//p' buildSrc/version.properties)"
+          TAG="$VERSION-${GITHUB_SHA::8}"
+          echo "$ARTIFACTORY_TOKEN" | docker login "$REGISTRY" -u "$ARTIFACTORY_USER" --password-stdin
+          for t in "$TAG" "$VERSION"; do
+            docker tag "$IMAGE" "$REGISTRY/$IMAGE_PATH:$t"
+            docker push "$REGISTRY/$IMAGE_PATH:$t"
+          done
+          if [[ -n "$HELM_REPO" ]]; then
+            echo "$ARTIFACTORY_TOKEN" | helm registry login "$REGISTRY" -u "$ARTIFACTORY_USER" --password-stdin
+            helm package lite/helm/opensearch-lite --app-version "$VERSION" -d lite/build
+            helm push lite/build/opensearch-lite-*.tgz "oci://$REGISTRY/$HELM_REPO"
+          fi

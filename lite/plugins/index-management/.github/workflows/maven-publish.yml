@@ -1,0 +1,42 @@
+name: Publish snapshots to maven
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - '[0-9]+.[0-9]+'
+      - '[0-9]+.x'
+
+jobs:
+  build-and-publish-snapshots:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: write
+
+    steps:
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin # Temurin is a distribution of adoptium
+          java-version: 21
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Load secret
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          # Export loaded secrets as environment variables
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          MAVEN_SNAPSHOTS_S3_REPO: op://opensearch-infra-secrets/maven-snapshots-s3/repo
+          MAVEN_SNAPSHOTS_S3_ROLE: op://opensearch-infra-secrets/maven-snapshots-s3/role
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ env.MAVEN_SNAPSHOTS_S3_ROLE }}
+          aws-region: us-east-1
+      - name: publish snapshots to maven
+        run: |
+          ./gradlew publishPluginZipPublicationToSnapshotsRepository
+          ./gradlew publishShadowPublicationToSnapshotsRepository

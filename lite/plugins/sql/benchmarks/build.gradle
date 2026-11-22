@@ -1,0 +1,42 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+plugins {
+    id 'java-library'
+    id "io.freefair.lombok"
+    id "me.champeau.jmh" version "0.7.3"
+}
+
+repositories {
+    maven { url "https://ci.opensearch.org/maven2/" }
+    mavenCentral()
+}
+
+dependencies {
+    implementation project(':core')
+    implementation project(':opensearch')
+    implementation project(':api')
+    jmhImplementation testFixtures(project(':api'))
+
+    // Dependencies required by JMH micro benchmark
+    api group: 'org.openjdk.jmh', name: 'jmh-core', version: '1.36'
+    annotationProcessor group: 'org.openjdk.jmh', name: 'jmh-generator-annprocess', version: '1.36'
+}
+
+spotless {
+    java {
+        target fileTree('.') {
+            include '**/*.java'
+            exclude '**/jmh_generated/**'
+        }
+    }
+}
+
+// JMH configuration passed via command line
+jmh {
+    includes = project.hasProperty('jmh.includes') ? [project.property('jmh.includes')] : []
+}
+
+compileJava.options.compilerArgs.addAll(["-processor", "org.openjdk.jmh.generators.BenchmarkProcessor"])

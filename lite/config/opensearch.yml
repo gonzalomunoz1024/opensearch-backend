@@ -1,0 +1,23 @@
+# OpenSearch Lite configuration.
+#
+# The security plugin is not installed: there is no login, no TLS and no roles.
+# Anyone who can reach port 9200 (REST) or 9300 (node to node) can read, change
+# and delete every index and every cluster setting. Keep both ports on a
+# private network; lite/README.md says how.
+
+cluster.name: opensearch-lite
+
+# One node, which also skips the production bootstrap checks (vm.max_map_count
+# and the like). For a cluster of several nodes set discovery.type to zen and
+# give discovery.seed_hosts and cluster.initial_cluster_manager_nodes; the Helm
+# chart does this when replicas is more than 1.
+discovery.type: single-node
+
+# One node has nowhere to put replicas, and an index that waits for one keeps the
+# cluster yellow. New indexes that do not ask for a number get none. The Helm chart
+# sets this back to 1 for a cluster of several nodes; indexes made before that keep
+# what they have (PUT <index>/_settings {"number_of_replicas": 1} changes it).
+cluster.default_number_of_replicas: 0
+
+# network.host is not set here, so a node started from the tarball listens on
+# localhost only. The container image sets it to 0.0.0.0.

@@ -1,0 +1,131 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Licensed to Elasticsearch under one or more contributor
+ * license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright
+ * ownership. Elasticsearch licenses this file to you under
+ * the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+plugins {
+    id 'java'
+    id 'io.freefair.lombok'
+    id 'antlr'
+    id 'com.diffplug.spotless'
+}
+
+generateGrammarSource {
+    arguments += ['-visitor', '-package', 'org.opensearch.sql.legacy.antlr.parser']
+    source = sourceSets.main.antlr
+    outputDirectory = file("build/generated-src/antlr/main/org/opensearch/sql/legacy/antlr/parser")
+}
+
+// Remove ANTLR plugin jars as it's specified as 'compile' dependency internally
+configurations {
+    compile {
+        extendsFrom = extendsFrom.findAll { it != configurations.antlr }
+    }
+}
+
+// TODO: fix compiler warnings
+compileJava.options.warnings = false
+compileJava {
+    options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
+    doFirst {
+        // TODO: do not fail build on warnings, need to fix all compiler warnings
+        options.compilerArgs.remove('-Werror')
+        // TODO: need to fix all java doc format
+        options.compilerArgs.remove('-Xdoclint:all')
+    }
+}
+
+spotless {
+    java {
+        target fileTree('.') {
+            include '**/*.java'
+            exclude '**/build/**', '**/build-*/**', '**/gen/**'
+        }
+        importOrder()
+        licenseHeader("/*\n" +
+                " * Copyright OpenSearch Contributors\n" +
+                " * SPDX-License-Identifier: Apache-2.0\n" +
+                " */\n\n")
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+        googleJavaFormat('1.32.0').reflowLongStrings().groupArtifact('com.google.googlejavaformat:google-java-format')
+    }
+}
+
+// TODO: Similarly, need to fix compiling errors in test source code
+compileTestJava.options.warnings = false
+compileTestJava {
+    options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
+    doFirst {
+        options.compilerArgs.remove('-Werror')
+        options.compilerArgs.remove('-Xdoclint:all')
+    }
+}
+
+// TODO: Need to update integration test to use OpenSearch test framework
+test {
+    maxParallelForks = Runtime.runtime.availableProcessors()
+    include '**/*Test.class'
+    exclude 'org/opensearch/sql/intgtest/**'
+    // Gradle runs unit test using a working directory other and project root
+    // set 'project.projectDir' property to allow unit test classes to access test resources
+    // in src/test/resources in current module
+    systemProperty('project.root', project.projectDir.absolutePath)
+
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+}
+
+dependencies {
+    implementation group: 'com.alibaba', name: 'druid', version:'1.0.15'
+    implementation group: 'org.locationtech.spatial4j', name: 'spatial4j', version:'0.7'
+    implementation group: "org.opensearch.plugin", name: 'parent-join-client', version: "${opensearch_version}"
+    implementation group: "org.opensearch.plugin", name: 'reindex-client', version: "${opensearch_version}"
+    constraints {
+        implementation("commons-codec:commons-codec:${commons_codec_version}") {
+            because 'https://www.whitesourcesoftware.com/vulnerability-database/WS-2019-0379'
+        }
+    }
+    implementation group: 'com.google.guava', name: 'guava', version: "${guava_version}"
+    implementation group: 'org.json', name: 'json', version:'20231013'
+    implementation group: 'org.apache.commons', name: 'commons-lang3', version: "${commons_lang3_version}"
+    implementation group: 'org.apache.commons', name: 'commons-text', version: "${commons_text_version}"
+    implementation group: 'org.opensearch', name: 'opensearch', version: "${opensearch_version}"
+    // add geo module as dependency. https://github.com/opensearch-project/OpenSearch/pull/4180/.
+    implementation group: 'org.opensearch.plugin', name: 'geo', version: "${opensearch_version}"
+    api project(':sql')
+    api project(':common')
+    api project(':opensearch')
+
+    // ANTLR gradle plugin and runtime dependency
+    antlr "org.antlr:antlr4:4.13.2"
+    implementation "org.antlr:antlr4-runtime:4.13.2"
+    compileOnly group: 'javax.servlet', name: 'servlet-api', version:'2.5'
+
+    testImplementation group: 'org.hamcrest', name: 'hamcrest-core', version:'2.2'
+    testImplementation group: 'org.mockito', name: 'mockito-core', version: "${mockito_version}"
+    testImplementation group: 'junit', name: 'junit', version: '4.13.2'
+
+}

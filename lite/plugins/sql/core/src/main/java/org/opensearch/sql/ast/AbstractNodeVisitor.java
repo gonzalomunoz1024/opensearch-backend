@@ -1,0 +1,531 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.sql.ast;
+
+import org.opensearch.sql.ast.expression.AggregateFunction;
+import org.opensearch.sql.ast.expression.Alias;
+import org.opensearch.sql.ast.expression.AllFields;
+import org.opensearch.sql.ast.expression.AllFieldsExcludeMeta;
+import org.opensearch.sql.ast.expression.And;
+import org.opensearch.sql.ast.expression.Argument;
+import org.opensearch.sql.ast.expression.AttributeList;
+import org.opensearch.sql.ast.expression.Between;
+import org.opensearch.sql.ast.expression.Case;
+import org.opensearch.sql.ast.expression.Cast;
+import org.opensearch.sql.ast.expression.Compare;
+import org.opensearch.sql.ast.expression.EqualTo;
+import org.opensearch.sql.ast.expression.Field;
+import org.opensearch.sql.ast.expression.ForeachPlaceholder;
+import org.opensearch.sql.ast.expression.Function;
+import org.opensearch.sql.ast.expression.HighlightFunction;
+import org.opensearch.sql.ast.expression.In;
+import org.opensearch.sql.ast.expression.Interval;
+import org.opensearch.sql.ast.expression.LambdaFunction;
+import org.opensearch.sql.ast.expression.Let;
+import org.opensearch.sql.ast.expression.Literal;
+import org.opensearch.sql.ast.expression.Map;
+import org.opensearch.sql.ast.expression.NestedAllTupleFields;
+import org.opensearch.sql.ast.expression.Not;
+import org.opensearch.sql.ast.expression.Or;
+import org.opensearch.sql.ast.expression.QualifiedName;
+import org.opensearch.sql.ast.expression.RelevanceFieldList;
+import org.opensearch.sql.ast.expression.ScoreFunction;
+import org.opensearch.sql.ast.expression.Span;
+import org.opensearch.sql.ast.expression.UnresolvedArgument;
+import org.opensearch.sql.ast.expression.UnresolvedAttribute;
+import org.opensearch.sql.ast.expression.When;
+import org.opensearch.sql.ast.expression.WindowFunction;
+import org.opensearch.sql.ast.expression.Xor;
+import org.opensearch.sql.ast.expression.subquery.ExistsSubquery;
+import org.opensearch.sql.ast.expression.subquery.InSubquery;
+import org.opensearch.sql.ast.expression.subquery.ScalarSubquery;
+import org.opensearch.sql.ast.statement.Explain;
+import org.opensearch.sql.ast.statement.Query;
+import org.opensearch.sql.ast.statement.Statement;
+import org.opensearch.sql.ast.tree.AD;
+import org.opensearch.sql.ast.tree.AddColTotals;
+import org.opensearch.sql.ast.tree.AddTotals;
+import org.opensearch.sql.ast.tree.Aggregation;
+import org.opensearch.sql.ast.tree.Append;
+import org.opensearch.sql.ast.tree.AppendCol;
+import org.opensearch.sql.ast.tree.AppendPipe;
+import org.opensearch.sql.ast.tree.Bin;
+import org.opensearch.sql.ast.tree.Chart;
+import org.opensearch.sql.ast.tree.CloseCursor;
+import org.opensearch.sql.ast.tree.Convert;
+import org.opensearch.sql.ast.tree.Dedupe;
+import org.opensearch.sql.ast.tree.Eval;
+import org.opensearch.sql.ast.tree.Expand;
+import org.opensearch.sql.ast.tree.FetchCursor;
+import org.opensearch.sql.ast.tree.FillNull;
+import org.opensearch.sql.ast.tree.Filter;
+import org.opensearch.sql.ast.tree.Flatten;
+import org.opensearch.sql.ast.tree.Foreach;
+import org.opensearch.sql.ast.tree.GraphLookup;
+import org.opensearch.sql.ast.tree.Head;
+import org.opensearch.sql.ast.tree.Join;
+import org.opensearch.sql.ast.tree.Kmeans;
+import org.opensearch.sql.ast.tree.Limit;
+import org.opensearch.sql.ast.tree.Lookup;
+import org.opensearch.sql.ast.tree.ML;
+import org.opensearch.sql.ast.tree.MakeResults;
+import org.opensearch.sql.ast.tree.Multisearch;
+import org.opensearch.sql.ast.tree.MvCombine;
+import org.opensearch.sql.ast.tree.MvExpand;
+import org.opensearch.sql.ast.tree.NoMv;
+import org.opensearch.sql.ast.tree.Paginate;
+import org.opensearch.sql.ast.tree.Parse;
+import org.opensearch.sql.ast.tree.Patterns;
+import org.opensearch.sql.ast.tree.Project;
+import org.opensearch.sql.ast.tree.RareTopN;
+import org.opensearch.sql.ast.tree.Regex;
+import org.opensearch.sql.ast.tree.Relation;
+import org.opensearch.sql.ast.tree.RelationSubquery;
+import org.opensearch.sql.ast.tree.Rename;
+import org.opensearch.sql.ast.tree.Replace;
+import org.opensearch.sql.ast.tree.Reverse;
+import org.opensearch.sql.ast.tree.Rex;
+import org.opensearch.sql.ast.tree.SPath;
+import org.opensearch.sql.ast.tree.Search;
+import org.opensearch.sql.ast.tree.Sort;
+import org.opensearch.sql.ast.tree.StreamWindow;
+import org.opensearch.sql.ast.tree.SubqueryAlias;
+import org.opensearch.sql.ast.tree.TableFunction;
+import org.opensearch.sql.ast.tree.Timewrap;
+import org.opensearch.sql.ast.tree.Transpose;
+import org.opensearch.sql.ast.tree.Trendline;
+import org.opensearch.sql.ast.tree.Union;
+import org.opensearch.sql.ast.tree.Values;
+import org.opensearch.sql.ast.tree.Window;
+import org.opensearch.sql.ast.tree.Xyseries;
+
+/** AST nodes visitor Defines the traverse path. */
+public abstract class AbstractNodeVisitor<T, C> {
+
+  public T visit(Node node, C context) {
+    return null;
+  }
+
+  /**
+   * Visit child node.
+   *
+   * @param node {@link Node}
+   * @param context Context
+   * @return Return Type.
+   */
+  public T visitChildren(Node node, C context) {
+    T result = defaultResult();
+
+    for (Node child : node.getChild()) {
+      T childResult = child.accept(this, context);
+      result = aggregateResult(result, childResult);
+    }
+    return result;
+  }
+
+  private T defaultResult() {
+    return null;
+  }
+
+  private T aggregateResult(T aggregate, T nextResult) {
+    return nextResult;
+  }
+
+  public T visitRelation(Relation node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitRelationSubquery(RelationSubquery node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitExpand(Expand expand, C context) {
+    return visitChildren(expand, context);
+  }
+
+  public T visitTableFunction(TableFunction node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitSearch(Search node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAppendPipe(AppendPipe node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitFilter(Filter node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitFlatten(Flatten node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitTrendline(Trendline node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitTrendlineComputation(Trendline.TrendlineComputation node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitProject(Project node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitForeach(Foreach node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAggregation(Aggregation node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitEqualTo(EqualTo node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitLiteral(Literal node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitRelevanceFieldList(RelevanceFieldList node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitUnresolvedAttribute(UnresolvedAttribute node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAttributeList(AttributeList node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitMap(Map node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitNot(Not node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitOr(Or node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAnd(And node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitXor(Xor node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAggregateFunction(AggregateFunction node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitFunction(Function node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitWindowFunction(WindowFunction node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitIn(In node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitCompare(Compare node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitBetween(Between node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitBin(Bin node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitArgument(Argument node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitField(Field node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitForeachPlaceholder(ForeachPlaceholder node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitQualifiedName(QualifiedName node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitRename(Rename node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitReplace(Replace node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitEval(Eval node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitFieldFormat(Eval node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitParse(Parse node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitSpath(SPath node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitLet(Let node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitSort(Sort node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitReverse(Reverse node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitTranspose(Transpose node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitChart(Chart node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitTimewrap(Timewrap node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitRegex(Regex node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitRex(Rex node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitLambdaFunction(LambdaFunction node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitDedupe(Dedupe node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitHead(Head node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitRareTopN(RareTopN node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitValues(Values node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitMakeResults(MakeResults node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAlias(Alias node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAllFields(AllFields node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAllFieldsExcludeMeta(AllFieldsExcludeMeta node, C context) {
+    // AllFieldsExcludeMeta is an AllFields, so fall back to visitAllFields by default. Visitors
+    // that need to tell the two apart override this method; visitors that don't would otherwise
+    // silently return null here and NPE in their caller.
+    return visitAllFields(node, context);
+  }
+
+  public T visitNestedAllTupleFields(NestedAllTupleFields node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitInterval(Interval node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitCase(Case node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitWhen(When node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitCast(Cast node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitUnresolvedArgument(UnresolvedArgument node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitLimit(Limit node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitSpan(Span node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitKmeans(Kmeans node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAD(AD node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitML(ML node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitHighlightFunction(HighlightFunction node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitScoreFunction(ScoreFunction node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitStatement(Statement node, C context) {
+    return visit(node, context);
+  }
+
+  public T visitQuery(Query node, C context) {
+    return visitStatement(node, context);
+  }
+
+  public T visitExplain(Explain node, C context) {
+    return visitStatement(node, context);
+  }
+
+  public T visitInSubquery(InSubquery node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitPaginate(Paginate paginate, C context) {
+    return visitChildren(paginate, context);
+  }
+
+  public T visitFetchCursor(FetchCursor cursor, C context) {
+    return visitChildren(cursor, context);
+  }
+
+  public T visitCloseCursor(CloseCursor closeCursor, C context) {
+    return visitChildren(closeCursor, context);
+  }
+
+  public T visitFillNull(FillNull fillNull, C context) {
+    return visitChildren(fillNull, context);
+  }
+
+  public T visitConvert(Convert node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitPatterns(Patterns patterns, C context) {
+    return visitChildren(patterns, context);
+  }
+
+  public T visitWindow(Window window, C context) {
+    return visitChildren(window, context);
+  }
+
+  public T visitStreamWindow(StreamWindow node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitJoin(Join node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitLookup(Lookup node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitSubqueryAlias(SubqueryAlias node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitScalarSubquery(ScalarSubquery node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitExistsSubquery(ExistsSubquery node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAppendCol(AppendCol node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAppend(Append node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitMultisearch(Multisearch node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitUnion(Union node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAddTotals(AddTotals node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitAddColTotals(AddColTotals node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitMvCombine(MvCombine node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitNoMv(NoMv node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitMvExpand(MvExpand node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitGraphLookup(GraphLookup node, C context) {
+    return visitChildren(node, context);
+  }
+
+  public T visitXyseries(Xyseries node, C context) {
+    return visitChildren(node, context);
+  }
+}

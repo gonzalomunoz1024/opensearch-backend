@@ -1,0 +1,56 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.indexmanagement.rollup.model.metric
+
+import org.opensearch.core.common.io.stream.Writeable
+import org.opensearch.core.xcontent.ToXContentObject
+import org.opensearch.core.xcontent.XContentParser
+import org.opensearch.core.xcontent.XContentParser.Token
+import org.opensearch.core.xcontent.XContentParserUtils.ensureExpectedToken
+import java.io.IOException
+
+abstract class Metric(val type: Type) :
+    ToXContentObject,
+    Writeable {
+    enum class Type(val type: String) {
+        AVERAGE("avg"),
+        SUM("sum"),
+        MAX("max"),
+        MIN("min"),
+        VALUE_COUNT("value_count"),
+        CARDINALITY("cardinality"),
+        ;
+
+        override fun toString(): String = type
+    }
+
+    companion object {
+        @Suppress("CyclomaticComplexMethod")
+        @JvmStatic
+        @Throws(IOException::class)
+        fun parse(xcp: XContentParser): Metric {
+            var metric: Metric? = null
+            ensureExpectedToken(Token.START_OBJECT, xcp.currentToken(), xcp)
+            while (xcp.nextToken() != Token.END_OBJECT) {
+                val fieldName = xcp.currentName()
+                xcp.nextToken()
+
+                metric =
+                    when (fieldName) {
+                        Type.AVERAGE.type -> Average.parse(xcp)
+                        Type.MAX.type -> Max.parse(xcp)
+                        Type.MIN.type -> Min.parse(xcp)
+                        Type.SUM.type -> Sum.parse(xcp)
+                        Type.VALUE_COUNT.type -> ValueCount.parse(xcp)
+                        Type.CARDINALITY.type -> Cardinality.parse(xcp)
+                        else -> throw IllegalArgumentException("Invalid metric type [$fieldName] found in metrics")
+                    }
+            }
+
+            return requireNotNull(metric) { "Metric is null" }
+        }
+    }
+}

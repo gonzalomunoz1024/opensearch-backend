@@ -1,0 +1,13 @@
+apply plugin: 'groovy'
+apply plugin: 'java'
+
+
+repositories {
+    maven { url "https://ci.opensearch.org/maven2/" }
+    mavenCentral()
+}
+
+dependencies {
+    implementation gradleApi()
+    implementation localGroovy()
+}

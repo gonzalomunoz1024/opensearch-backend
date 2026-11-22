@@ -1,0 +1,6 @@
+apiVersion: v2
+name: opensearch-lite
+description: OpenSearch Lite (OpenSearch without the security plugin, with Index Management and SQL) for Kubernetes and OpenShift. Needs no elevated rights.
+type: application
+version: 0.1.0
+appVersion: "3.9.0"

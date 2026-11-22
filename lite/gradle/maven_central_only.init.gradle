@@ -1,0 +1,41 @@
+/*
+ * Gradle init script used by lite/build.sh.
+ *
+ * Upstream's builds list ci.opensearch.org (OpenSearch's own snapshot and
+ * mirror repositories) before Maven Central, and the SQL plugin adds
+ * jitpack.io. A release build needs nothing from either (lite/analytics-api
+ * and lite/okhttp-aws-signer build the two artifacts that only live there),
+ * and in-house networks often block them; a blocked repository makes Gradle
+ * fail instead of falling through to the next one. This script drops those
+ * repositories everywhere: settings, buildSrc and every project, so the build
+ * needs only Maven Central and the Gradle plugin portal (or your mirrors).
+ */
+def blockedHosts = ['ci.opensearch.org', 'jitpack.io'] as Set
+def isOpenSearchCi = { repo ->
+  repo instanceof org.gradle.api.artifacts.repositories.UrlArtifactRepository &&
+    repo.url != null && blockedHosts.contains(repo.url.host)
+}
+
+def strip = { RepositoryHandler repos ->
+  repos.whenObjectAdded { repo ->
+    if (isOpenSearchCi(repo)) {
+      // Remove after the add has finished; removing inside the callback is not allowed.
+      gradle.taskGraph.whenReady { repos.remove(repo) }
+      repos.remove(repo)
+    }
+  }
+  repos.removeAll { isOpenSearchCi(it) }
+}
+
+beforeSettings { settings ->
+  strip(settings.pluginManagement.repositories)
+  settings.gradle.settingsEvaluated { s ->
+    s.pluginManagement.repositories.removeAll { isOpenSearchCi(it) }
+  }
+}
+
+allprojects { project ->
+  strip(project.repositories)
+  project.buildscript { strip(repositories) }
+  project.afterEvaluate { p -> p.repositories.removeAll { isOpenSearchCi(it) } }
+}

@@ -1,0 +1,5 @@
+# Keep the Docker build context to the sources lite/Dockerfile compiles.
+.git
+**/build
+**/.gradle
+!lite/build/opensearch-lite

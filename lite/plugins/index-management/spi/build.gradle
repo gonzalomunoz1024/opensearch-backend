@@ -1,0 +1,171 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.opensearch.gradle.test.RestIntegTestTask
+
+plugins {
+    id 'com.gradleup.shadow'
+    id 'jacoco'
+}
+
+apply plugin: 'opensearch.java'
+apply plugin: 'opensearch.testclusters'
+apply plugin: 'opensearch.java-rest-test'
+apply plugin: 'kotlin'
+apply plugin: 'org.jetbrains.kotlin.jvm'
+apply plugin: 'org.jetbrains.kotlin.plugin.allopen'
+apply plugin: 'idea'
+apply plugin: 'maven-publish'
+
+ext {
+    projectSubstitutions = [:]
+    licenseFile = rootProject.file('LICENSE.txt')
+    noticeFile = rootProject.file('NOTICE')
+}
+
+plugins.withId('java') {
+    java {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+}
+
+plugins.withId('org.jetbrains.kotlin.jvm') {
+    compileKotlin.compilerOptions.jvmTarget.set(JvmTarget.JVM_21)
+    compileTestKotlin.compilerOptions.jvmTarget.set(JvmTarget.JVM_21)
+}
+
+jacoco {
+    toolVersion = '0.8.12'
+    reportsDirectory = file("$buildDir/JacocoReport")
+}
+
+jacocoTestReport {
+    reports {
+        xml.required.set(false)
+        csv.required.set(false)
+        html.outputLocation.set(file("${buildDir}/jacoco/"))
+    }
+}
+
+repositories {
+    mavenLocal()
+    maven { url "https://ci.opensearch.org/maven2/" }
+    maven { url "https://ci.opensearch.org/m2/" }
+    mavenCentral()
+    maven { url "https://plugins.gradle.org/m2/" }
+    maven { url "https://ci.opensearch.org/ci/dbc/snapshots/maven/" }
+}
+
+configurations.configureEach {
+    if (it.state != Configuration.State.UNRESOLVED) return
+    resolutionStrategy {
+        force "org.jetbrains.kotlin:kotlin-stdlib:${kotlin_version}"
+        force "org.jetbrains.kotlin:kotlin-stdlib-common:${kotlin_version}"
+        force "com.google.errorprone:error_prone_annotations:${versions.error_prone_annotations}"
+    }
+}
+
+dependencies {
+    compileOnly "org.opensearch:opensearch:${opensearch_version}"
+    compileOnly "org.opensearch:opensearch-job-scheduler-spi:${job_scheduler_version}"
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib:${kotlin_version}"
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib-common:${kotlin_version}"
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib-jdk8:${kotlin_version}"
+    compileOnly "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.3.9"
+    compileOnly "org.opensearch:common-utils:${common_utils_version}"
+
+    testImplementation "org.opensearch.test:framework:${opensearch_version}"
+}
+
+idea.module {
+    excludeDirs -= file("$buildDir")
+}
+
+tasks.register("sourcesJar", Jar) {
+    dependsOn "classes"
+    archiveClassifier = 'sources'
+    from sourceSets.main.allSource
+}
+
+task javadocJar(type: Jar) {
+    archiveClassifier = 'javadoc'
+    from javadoc.destinationDir
+}
+
+test {
+    doFirst {
+        test.classpath -= project.files(project.tasks.named('shadowJar'))
+        test.classpath -= project.configurations.named(ShadowBasePlugin.CONFIGURATION_NAME)
+        test.classpath += project.extensions.getByType(SourceSetContainer).named(SourceSet.MAIN_SOURCE_SET_NAME).runtimeClasspath
+    }
+    systemProperty 'tests.security.manager', 'false'
+}
+
+tasks.register("integTest", RestIntegTestTask) {
+    description 'Run integ test with opensearch test framework'
+    group 'verification'
+    systemProperty 'tests.security.manager', 'false'
+    dependsOn test
+}
+check.dependsOn integTest
+
+testClusters.javaRestTest {
+    testDistribution = 'INTEG_TEST'
+}
+
+publishing {
+    repositories {
+        maven {
+            name = 'staging'
+            url = "${rootProject.buildDir}/local-staging-repo"
+        }
+        maven {
+            name = "Snapshots"
+            url = System.getenv("MAVEN_SNAPSHOTS_S3_REPO")
+            credentials(AwsCredentials) {
+                accessKey = System.getenv("AWS_ACCESS_KEY_ID")
+                secretKey = System.getenv("AWS_SECRET_ACCESS_KEY")
+                sessionToken = System.getenv("AWS_SESSION_TOKEN")
+            }
+        }
+    }
+    publications {
+        shadow(MavenPublication) {
+            from components.shadow
+
+            artifact sourcesJar
+            artifact javadocJar
+
+            pom {
+                name = "OpenSearch Index Management SPI"
+                packaging = "jar"
+                url = "https://github.com/opensearch-project/index-management"
+                description = "OpenSearch Index Management SPI"
+                scm {
+                    connection = "scm:git@github.com:opensearch-project/index-management.git"
+                    developerConnection = "scm:git@github.com:opensearch-project/index-management.git"
+                    url = "git@github.com:opensearch-project/index-management.git"
+                }
+                licenses {
+                    license {
+                        name = "The Apache License, Version 2.0"
+                        url = "http://www.apache.org/licenses/LICENSE-2.0.txt"
+                    }
+                }
+                developers {
+                    developer {
+                        name = "OpenSearch"
+                        url = "https://github.com/opensearch-project/index-management"
+                    }
+                }
+            }
+        }
+    }
+
+    gradle.startParameter.setShowStacktrace(ShowStacktrace.ALWAYS)
+    gradle.startParameter.setLogLevel(LogLevel.DEBUG)
+}
