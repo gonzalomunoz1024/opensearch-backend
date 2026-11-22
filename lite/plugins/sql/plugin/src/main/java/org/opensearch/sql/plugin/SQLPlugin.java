@@ -1,0 +1,561 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.sql.plugin;
+
+import static org.opensearch.sql.datasource.model.DataSourceMetadata.defaultOpenSearchDataSourceMetadata;
+import static org.opensearch.sql.opensearch.executor.OpenSearchQueryManager.SQL_BACKGROUND_THREAD_POOL_NAME;
+import static org.opensearch.sql.opensearch.executor.OpenSearchQueryManager.SQL_COMPLEX_WORKER_THREAD_POOL_NAME;
+import static org.opensearch.sql.opensearch.executor.OpenSearchQueryManager.SQL_WORKER_THREAD_POOL_NAME;
+import static org.opensearch.sql.spark.data.constants.SparkConstants.SPARK_REQUEST_BUFFER_INDEX_NAME;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import java.time.Clock;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.BiFunction;
+import java.util.function.Supplier;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.action.ActionRequest;
+import org.opensearch.action.ActionType;
+import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.node.DiscoveryNodes;
+import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.inject.Guice;
+import org.opensearch.common.inject.Injector;
+import org.opensearch.common.inject.ModulesBuilder;
+import org.opensearch.common.settings.ClusterSettings;
+import org.opensearch.common.settings.IndexScopedSettings;
+import org.opensearch.common.settings.Setting;
+import org.opensearch.common.settings.Settings;
+import org.opensearch.common.settings.SettingsFilter;
+import org.opensearch.common.util.concurrent.OpenSearchExecutors;
+import org.opensearch.core.action.ActionListener;
+import org.opensearch.core.action.ActionResponse;
+import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
+import org.opensearch.core.rest.RestStatus;
+import org.opensearch.core.xcontent.NamedXContentRegistry;
+import org.opensearch.env.Environment;
+import org.opensearch.env.NodeEnvironment;
+import org.opensearch.indices.SystemIndexDescriptor;
+import org.opensearch.jobscheduler.spi.JobSchedulerExtension;
+import org.opensearch.jobscheduler.spi.ScheduledJobParser;
+import org.opensearch.jobscheduler.spi.ScheduledJobRunner;
+import org.opensearch.plugins.ActionPlugin;
+import org.opensearch.plugins.ExtensiblePlugin;
+import org.opensearch.plugins.Plugin;
+import org.opensearch.plugins.ScriptPlugin;
+import org.opensearch.plugins.SystemIndexPlugin;
+import org.opensearch.repositories.RepositoriesService;
+import org.opensearch.rest.BytesRestResponse;
+import org.opensearch.rest.RestChannel;
+import org.opensearch.rest.RestController;
+import org.opensearch.rest.RestHandler;
+import org.opensearch.script.ScriptContext;
+import org.opensearch.script.ScriptEngine;
+import org.opensearch.script.ScriptService;
+import org.opensearch.sql.ast.statement.ExplainMode;
+import org.opensearch.sql.common.response.ResponseListener;
+import org.opensearch.sql.common.utils.QueryContext;
+import org.opensearch.sql.datasource.DataSourceService;
+import org.opensearch.sql.datasources.auth.DataSourceUserAuthorizationHelper;
+import org.opensearch.sql.datasources.auth.DataSourceUserAuthorizationHelperImpl;
+import org.opensearch.sql.datasources.encryptor.EncryptorImpl;
+import org.opensearch.sql.datasources.glue.GlueDataSourceFactory;
+import org.opensearch.sql.datasources.glue.SecurityLakeDataSourceFactory;
+import org.opensearch.sql.datasources.model.transport.CreateDataSourceActionResponse;
+import org.opensearch.sql.datasources.model.transport.DeleteDataSourceActionResponse;
+import org.opensearch.sql.datasources.model.transport.GetDataSourceActionResponse;
+import org.opensearch.sql.datasources.model.transport.PatchDataSourceActionResponse;
+import org.opensearch.sql.datasources.model.transport.UpdateDataSourceActionResponse;
+import org.opensearch.sql.datasources.rest.RestDataSourceQueryAction;
+import org.opensearch.sql.datasources.service.DataSourceMetadataStorage;
+import org.opensearch.sql.datasources.service.DataSourceServiceImpl;
+import org.opensearch.sql.datasources.storage.OpenSearchDataSourceMetadataStorage;
+import org.opensearch.sql.datasources.transport.TransportCreateDataSourceAction;
+import org.opensearch.sql.datasources.transport.TransportDeleteDataSourceAction;
+import org.opensearch.sql.datasources.transport.TransportGetDataSourceAction;
+import org.opensearch.sql.datasources.transport.TransportPatchDataSourceAction;
+import org.opensearch.sql.datasources.transport.TransportUpdateDataSourceAction;
+import org.opensearch.sql.directquery.DirectQueryExecutorService;
+import org.opensearch.sql.directquery.rest.RestDirectQueryManagementAction;
+import org.opensearch.sql.directquery.rest.RestDirectQueryResourcesManagementAction;
+import org.opensearch.sql.directquery.transport.TransportExecuteDirectQueryRequestAction;
+import org.opensearch.sql.directquery.transport.TransportGetDirectQueryResourcesRequestAction;
+import org.opensearch.sql.directquery.transport.TransportWriteDirectQueryResourcesRequestAction;
+import org.opensearch.sql.directquery.transport.config.DirectQueryModule;
+import org.opensearch.sql.directquery.transport.model.ExecuteDirectQueryActionResponse;
+import org.opensearch.sql.directquery.transport.model.ReadDirectQueryResourcesActionResponse;
+import org.opensearch.sql.directquery.transport.model.WriteDirectQueryResourcesActionResponse;
+import org.opensearch.sql.executor.ExecutionEngine;
+import org.opensearch.sql.executor.ExecutionEngine.ExplainResponse;
+import org.opensearch.sql.executor.QueryType;
+import org.opensearch.sql.legacy.esdomain.LocalClusterState;
+import org.opensearch.sql.legacy.metrics.Metrics;
+import org.opensearch.sql.legacy.plugin.RestSqlAction;
+import org.opensearch.sql.legacy.plugin.RestSqlStatsAction;
+import org.opensearch.sql.opensearch.client.OpenSearchNodeClient;
+import org.opensearch.sql.opensearch.setting.OpenSearchSettings;
+import org.opensearch.sql.opensearch.storage.OpenSearchDataSourceFactory;
+import org.opensearch.sql.opensearch.storage.rest.CoreEndpointsProvider;
+import org.opensearch.sql.opensearch.storage.rest.RestEndpointRegistry;
+import org.opensearch.sql.opensearch.storage.rest.RestEndpointRegistryHolder;
+import org.opensearch.sql.opensearch.storage.script.CompoundedScriptEngine;
+import org.opensearch.sql.plugin.config.EngineExtensionsHolder;
+import org.opensearch.sql.plugin.config.OpenSearchPluginModule;
+import org.opensearch.sql.plugin.rest.AnalyticsEngineFormatSupport;
+import org.opensearch.sql.plugin.rest.AnalyticsExecutorHolder;
+import org.opensearch.sql.plugin.rest.RestPPLGrammarAction;
+import org.opensearch.sql.plugin.rest.RestPPLQueryAction;
+import org.opensearch.sql.plugin.rest.RestPPLStatsAction;
+import org.opensearch.sql.plugin.rest.RestQuerySettingsAction;
+import org.opensearch.sql.plugin.rest.RestUnifiedQueryAction;
+import org.opensearch.sql.plugin.transport.PPLQueryAction;
+import org.opensearch.sql.plugin.transport.TransportPPLQueryAction;
+import org.opensearch.sql.plugin.transport.TransportPPLQueryResponse;
+import org.opensearch.sql.prometheus.storage.PrometheusStorageFactory;
+import org.opensearch.sql.protocol.response.format.JsonResponseFormatter;
+import org.opensearch.sql.protocol.response.format.JsonResponseFormatter.Style;
+import org.opensearch.sql.spark.asyncquery.AsyncQueryExecutorService;
+import org.opensearch.sql.spark.cluster.ClusterManagerEventListener;
+import org.opensearch.sql.spark.flint.FlintIndexMetadataServiceImpl;
+import org.opensearch.sql.spark.flint.operation.FlintIndexOpFactory;
+import org.opensearch.sql.spark.rest.RestAsyncQueryManagementAction;
+import org.opensearch.sql.spark.scheduler.OpenSearchAsyncQueryScheduler;
+import org.opensearch.sql.spark.scheduler.job.ScheduledAsyncQueryJobRunner;
+import org.opensearch.sql.spark.scheduler.parser.OpenSearchScheduleQueryJobRequestParser;
+import org.opensearch.sql.spark.transport.TransportCancelAsyncQueryRequestAction;
+import org.opensearch.sql.spark.transport.TransportCreateAsyncQueryRequestAction;
+import org.opensearch.sql.spark.transport.TransportGetAsyncQueryResultAction;
+import org.opensearch.sql.spark.transport.config.AsyncExecutorServiceModule;
+import org.opensearch.sql.spark.transport.model.CancelAsyncQueryActionResponse;
+import org.opensearch.sql.spark.transport.model.CreateAsyncQueryActionResponse;
+import org.opensearch.sql.spark.transport.model.GetAsyncQueryResultActionResponse;
+import org.opensearch.sql.spi.rest.RestEndpointProvider;
+import org.opensearch.sql.sql.domain.SQLQueryRequest;
+import org.opensearch.sql.storage.DataSourceFactory;
+import org.opensearch.telemetry.tracing.noop.NoopTracer;
+import org.opensearch.threadpool.ExecutorBuilder;
+import org.opensearch.threadpool.FixedExecutorBuilder;
+import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.client.Client;
+import org.opensearch.transport.client.node.NodeClient;
+import org.opensearch.watcher.ResourceWatcherService;
+
+public class SQLPlugin extends Plugin
+    implements ActionPlugin,
+        ScriptPlugin,
+        SystemIndexPlugin,
+        JobSchedulerExtension,
+        ExtensiblePlugin {
+
+  private static final Logger LOGGER = LogManager.getLogger(SQLPlugin.class);
+
+  private List<ExecutionEngine> executionEngineExtensions = List.of();
+  private List<RestEndpointProvider> restEndpointProviders = List.of();
+  private ClusterService clusterService;
+
+  /** Settings should be inited when bootstrap the plugin. */
+  private org.opensearch.sql.common.setting.Settings pluginSettings;
+
+  private NodeClient client;
+  private DataSourceServiceImpl dataSourceService;
+  private OpenSearchAsyncQueryScheduler asyncQueryScheduler;
+  private Injector injector;
+
+  public String name() {
+    return "sql";
+  }
+
+  public String description() {
+    return "Use sql to query OpenSearch.";
+  }
+
+  @Override
+  public void loadExtensions(ExtensionLoader loader) {
+    List<ExecutionEngine> loaded = loader.loadExtensions(ExecutionEngine.class);
+    this.executionEngineExtensions = loaded != null ? List.copyOf(loaded) : List.of();
+    if (!executionEngineExtensions.isEmpty()) {
+      LOGGER.info(
+          "Loaded {} execution engine extension(s): {}",
+          executionEngineExtensions.size(),
+          executionEngineExtensions.stream().map(e -> e.getClass().getSimpleName()).toList());
+    }
+
+    List<RestEndpointProvider> restProviders = loader.loadExtensions(RestEndpointProvider.class);
+    this.restEndpointProviders = restProviders != null ? List.copyOf(restProviders) : List.of();
+  }
+
+  private void publishRestCommandRegistries() {
+    List<RestEndpointProvider> providers = new ArrayList<>();
+    providers.add(new CoreEndpointsProvider());
+    providers.addAll(this.restEndpointProviders);
+    RestEndpointRegistryHolder.set(new RestEndpointRegistry(providers));
+  }
+
+  @Override
+  public List<RestHandler> getRestHandlers(
+      Settings settings,
+      RestController restController,
+      ClusterSettings clusterSettings,
+      IndexScopedSettings indexScopedSettings,
+      SettingsFilter settingsFilter,
+      IndexNameExpressionResolver indexNameExpressionResolver,
+      Supplier<DiscoveryNodes> nodesInCluster) {
+    Objects.requireNonNull(clusterService, "Cluster service is required");
+    Objects.requireNonNull(pluginSettings, "Cluster settings is required");
+
+    Metrics.getInstance().registerDefaultMetrics();
+
+    return Arrays.asList(
+        new RestPPLQueryAction(),
+        new RestPPLGrammarAction(),
+        new RestSqlAction(settings, injector, createSqlAnalyticsRouter()),
+        new RestSqlStatsAction(settings, restController),
+        new RestPPLStatsAction(settings, restController),
+        new RestQuerySettingsAction(settings, restController),
+        new RestDataSourceQueryAction((OpenSearchSettings) pluginSettings),
+        new RestAsyncQueryManagementAction((OpenSearchSettings) pluginSettings),
+        new RestDirectQueryManagementAction((OpenSearchSettings) pluginSettings),
+        new RestDirectQueryResourcesManagementAction((OpenSearchSettings) pluginSettings));
+  }
+
+  /**
+   * Creates a routing function for SQL queries targeting analytics engine indices. Returns {@code
+   * true} if the query was handled (analytics index), {@code false} to fall through to normal SQL.
+   *
+   * <p>The {@link RestUnifiedQueryAction} is built lazily on the first request because the
+   * analytics-engine {@code QueryPlanExecutor} is published into {@link AnalyticsExecutorHolder} by
+   * {@code TransportPPLQueryAction}'s {@code @Inject} constructor — which fires after the Node
+   * Guice injector is built, i.e. after {@code getRestHandlers}. If the executor is still
+   * unavailable when a SQL request arrives, the router falls through to the legacy SQL path.
+   */
+  private BiFunction<SQLQueryRequest, RestChannel, Boolean> createSqlAnalyticsRouter() {
+    final RestUnifiedQueryAction[] cached = new RestUnifiedQueryAction[1];
+    java.util.function.Supplier<RestUnifiedQueryAction> handlerSupplier =
+        () -> {
+          if (cached[0] == null) {
+            var executor = AnalyticsExecutorHolder.get();
+            var contextProvider = org.opensearch.sql.plugin.rest.EngineContextProviderHolder.get();
+            if (executor == null || contextProvider == null) {
+              return null;
+            }
+            cached[0] =
+                new RestUnifiedQueryAction(
+                    client,
+                    clusterService,
+                    executor,
+                    contextProvider,
+                    pluginSettings,
+                    new org.opensearch.sql.opensearch.executor.ThreadPoolExecutionDispatcher(
+                        client.threadPool(), pluginSettings));
+          }
+          return cached[0];
+        };
+    return (sqlRequest, channel) -> {
+      RestUnifiedQueryAction unifiedQueryHandler = handlerSupplier.get();
+      if (unifiedQueryHandler == null
+          || !unifiedQueryHandler.isAnalyticsIndex(sqlRequest.getQuery(), QueryType.SQL)) {
+        return false;
+      }
+      LOGGER.info("[{}] Routing SQL query to analytics engine", QueryContext.getRequestId());
+      if (sqlRequest.isExplainRequest()) {
+        unifiedQueryHandler.explain(
+            sqlRequest.getQuery(),
+            QueryType.SQL,
+            ExplainMode.STANDARD,
+            new ResponseListener<>() {
+              @Override
+              public void onResponse(ExplainResponse response) {
+                JsonResponseFormatter<ExplainResponse> formatter =
+                    new JsonResponseFormatter<>(Style.PRETTY) {
+                      @Override
+                      protected Object buildJsonObject(ExplainResponse resp) {
+                        return resp;
+                      }
+                    };
+                channel.sendResponse(
+                    new BytesRestResponse(
+                        RestStatus.OK,
+                        "application/json; charset=UTF-8",
+                        formatter.format(response)));
+              }
+
+              @Override
+              public void onFailure(Exception e) {
+                RestSqlAction.handleException(channel, e);
+              }
+            });
+      } else {
+        // Analytics route only emits JSON; reject unsupported formats (e.g. csv) with a 4xx.
+        try {
+          AnalyticsEngineFormatSupport.validateFormat(sqlRequest.format());
+        } catch (Exception e) {
+          RestSqlAction.handleException(channel, e);
+          return true;
+        }
+        unifiedQueryHandler.execute(
+            sqlRequest.getQuery(),
+            QueryType.SQL,
+            sqlRequest.isProfileEnabled(),
+            new ActionListener<>() {
+              @Override
+              public void onResponse(TransportPPLQueryResponse response) {
+                channel.sendResponse(
+                    new BytesRestResponse(
+                        RestStatus.OK, "application/json; charset=UTF-8", response.getResult()));
+              }
+
+              @Override
+              public void onFailure(Exception e) {
+                RestSqlAction.handleException(channel, e);
+              }
+            });
+      }
+      return true;
+    };
+  }
+
+  /** Register action and handler so that transportClient can find proxy for action. */
+  @Override
+  public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
+    return Arrays.asList(
+        new ActionHandler<>(
+            new ActionType<>(PPLQueryAction.NAME, TransportPPLQueryResponse::new),
+            TransportPPLQueryAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportCreateDataSourceAction.NAME, CreateDataSourceActionResponse::new),
+            TransportCreateDataSourceAction.class),
+        new ActionHandler<>(
+            new ActionType<>(TransportGetDataSourceAction.NAME, GetDataSourceActionResponse::new),
+            TransportGetDataSourceAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportUpdateDataSourceAction.NAME, UpdateDataSourceActionResponse::new),
+            TransportUpdateDataSourceAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportPatchDataSourceAction.NAME, PatchDataSourceActionResponse::new),
+            TransportPatchDataSourceAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportDeleteDataSourceAction.NAME, DeleteDataSourceActionResponse::new),
+            TransportDeleteDataSourceAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportCreateAsyncQueryRequestAction.NAME, CreateAsyncQueryActionResponse::new),
+            TransportCreateAsyncQueryRequestAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportGetAsyncQueryResultAction.NAME, GetAsyncQueryResultActionResponse::new),
+            TransportGetAsyncQueryResultAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportCancelAsyncQueryRequestAction.NAME, CancelAsyncQueryActionResponse::new),
+            TransportCancelAsyncQueryRequestAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportExecuteDirectQueryRequestAction.NAME,
+                ExecuteDirectQueryActionResponse::new),
+            TransportExecuteDirectQueryRequestAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportGetDirectQueryResourcesRequestAction.NAME,
+                ReadDirectQueryResourcesActionResponse::new),
+            TransportGetDirectQueryResourcesRequestAction.class),
+        new ActionHandler<>(
+            new ActionType<>(
+                TransportWriteDirectQueryResourcesRequestAction.NAME,
+                WriteDirectQueryResourcesActionResponse::new),
+            TransportWriteDirectQueryResourcesRequestAction.class));
+  }
+
+  @Override
+  public Collection<Object> createComponents(
+      Client client,
+      ClusterService clusterService,
+      ThreadPool threadPool,
+      ResourceWatcherService resourceWatcherService,
+      ScriptService scriptService,
+      NamedXContentRegistry contentRegistry,
+      Environment environment,
+      NodeEnvironment nodeEnvironment,
+      NamedWriteableRegistry namedWriteableRegistry,
+      IndexNameExpressionResolver indexNameResolver,
+      Supplier<RepositoriesService> repositoriesServiceSupplier) {
+    this.clusterService = clusterService;
+    this.pluginSettings = new OpenSearchSettings(clusterService.getClusterSettings());
+    this.client = (NodeClient) client;
+
+    publishRestCommandRegistries();
+
+    this.dataSourceService = createDataSourceService();
+    dataSourceService.createDataSource(defaultOpenSearchDataSourceMetadata());
+    LocalClusterState.state().setClusterService(clusterService);
+    LocalClusterState.state().setPluginSettings((OpenSearchSettings) pluginSettings);
+    LocalClusterState.state().setClient(client);
+    ModulesBuilder modules = new ModulesBuilder();
+    modules.add(new OpenSearchPluginModule(executionEngineExtensions, NoopTracer.INSTANCE));
+    modules.add(
+        b -> {
+          b.bind(NodeClient.class).toInstance((NodeClient) client);
+          b.bind(org.opensearch.sql.common.setting.Settings.class).toInstance(pluginSettings);
+          b.bind(DataSourceService.class).toInstance(dataSourceService);
+          b.bind(ClusterService.class).toInstance(clusterService);
+        });
+    modules.add(new AsyncExecutorServiceModule());
+    modules.add(new DirectQueryModule());
+    injector = Guice.createInjector(modules);
+    ClusterManagerEventListener clusterManagerEventListener =
+        new ClusterManagerEventListener(
+            clusterService,
+            threadPool,
+            client,
+            Clock.systemUTC(),
+            OpenSearchSettings.SESSION_INDEX_TTL_SETTING,
+            OpenSearchSettings.RESULT_INDEX_TTL_SETTING,
+            OpenSearchSettings.STREAMING_JOB_HOUSEKEEPER_INTERVAL_SETTING,
+            OpenSearchSettings.AUTO_INDEX_MANAGEMENT_ENABLED_SETTING,
+            environment.settings(),
+            dataSourceService,
+            injector.getInstance(FlintIndexMetadataServiceImpl.class),
+            injector.getInstance(FlintIndexOpFactory.class));
+
+    // Passing the service to Transport actions
+    AsyncQueryExecutorService asyncQueryExecutorService =
+        injector.getInstance(AsyncQueryExecutorService.class);
+    DirectQueryExecutorService directQueryExecutorService =
+        injector.getInstance(DirectQueryExecutorService.class);
+
+    ScheduledAsyncQueryJobRunner.getJobRunnerInstance()
+        .loadJobResource(client, clusterService, threadPool, asyncQueryExecutorService);
+
+    EngineExtensionsHolder extensionsHolder = new EngineExtensionsHolder(executionEngineExtensions);
+
+    return ImmutableList.of(
+        dataSourceService,
+        asyncQueryExecutorService,
+        clusterManagerEventListener,
+        pluginSettings,
+        directQueryExecutorService,
+        extensionsHolder);
+  }
+
+  @Override
+  public String getJobType() {
+    return OpenSearchAsyncQueryScheduler.SCHEDULER_PLUGIN_JOB_TYPE;
+  }
+
+  @Override
+  public String getJobIndex() {
+    return OpenSearchAsyncQueryScheduler.SCHEDULER_INDEX_NAME;
+  }
+
+  @Override
+  public ScheduledJobRunner getJobRunner() {
+    return ScheduledAsyncQueryJobRunner.getJobRunnerInstance();
+  }
+
+  @Override
+  public ScheduledJobParser getJobParser() {
+    return OpenSearchScheduleQueryJobRequestParser.getJobParser();
+  }
+
+  @Override
+  public List<ExecutorBuilder<?>> getExecutorBuilders(Settings settings) {
+    // The worker pool is the primary pool where most of the work is done. The complex-worker pool
+    // handles queries that require scripts (table scans that can't be pushed to Lucene) so they
+    // don't starve fast queries. The background thread pool is a separate queue for asynchronous
+    // requests to other nodes. We keep them separate to prevent deadlocks during async fetches on
+    // small node counts. Tasks in the background pool should do no work except I/O to other
+    // services.
+    return List.of(
+        new FixedExecutorBuilder(
+            settings,
+            SQL_WORKER_THREAD_POOL_NAME,
+            OpenSearchExecutors.allocatedProcessors(settings),
+            1000,
+            "thread_pool." + SQL_WORKER_THREAD_POOL_NAME),
+        new FixedExecutorBuilder(
+            settings,
+            SQL_COMPLEX_WORKER_THREAD_POOL_NAME,
+            OpenSearchExecutors.allocatedProcessors(settings),
+            1000,
+            "thread_pool." + SQL_COMPLEX_WORKER_THREAD_POOL_NAME),
+        new FixedExecutorBuilder(
+            settings,
+            SQL_BACKGROUND_THREAD_POOL_NAME,
+            settings.getAsInt(
+                "thread_pool.search.size", 2 * OpenSearchExecutors.allocatedProcessors(settings)),
+            1000,
+            "thread_pool." + SQL_BACKGROUND_THREAD_POOL_NAME));
+  }
+
+  @Override
+  public List<Setting<?>> getSettings() {
+    return new ImmutableList.Builder<Setting<?>>()
+        .addAll(OpenSearchSettings.pluginSettings())
+        .addAll(OpenSearchSettings.pluginNonDynamicSettings())
+        .build();
+  }
+
+  @Override
+  public ScriptEngine getScriptEngine(Settings settings, Collection<ScriptContext<?>> contexts) {
+    // Resolve plugin settings lazily: getScriptEngine runs before createComponents sets them.
+    return new CompoundedScriptEngine(() -> pluginSettings);
+  }
+
+  private DataSourceServiceImpl createDataSourceService() {
+    String masterKey =
+        OpenSearchSettings.DATASOURCE_MASTER_SECRET_KEY.get(clusterService.getSettings());
+    if (StringUtils.isEmpty(masterKey)) {
+      LOGGER.warn(
+          "Master key is a required config for using create and update datasource APIs. "
+              + "Please set plugins.query.datasources.encryption.masterkey config "
+              + "in opensearch.yml in all the cluster nodes. "
+              + "More details can be found here: "
+              + "https://github.com/opensearch-project/sql/blob/main/docs/user/ppl/"
+              + "admin/datasources.rst#master-key-config-for-encrypting-credential-information");
+    }
+    DataSourceMetadataStorage dataSourceMetadataStorage =
+        new OpenSearchDataSourceMetadataStorage(
+            client,
+            clusterService,
+            new EncryptorImpl(masterKey),
+            (OpenSearchSettings) pluginSettings);
+    DataSourceUserAuthorizationHelper dataSourceUserAuthorizationHelper =
+        new DataSourceUserAuthorizationHelperImpl(client);
+    return new DataSourceServiceImpl(
+        new ImmutableSet.Builder<DataSourceFactory>()
+            .add(
+                new OpenSearchDataSourceFactory(
+                    new OpenSearchNodeClient(this.client), pluginSettings))
+            .add(new PrometheusStorageFactory(pluginSettings))
+            .add(new GlueDataSourceFactory(pluginSettings))
+            .add(new SecurityLakeDataSourceFactory(pluginSettings))
+            .build(),
+        dataSourceMetadataStorage,
+        dataSourceUserAuthorizationHelper);
+  }
+
+  @Override
+  public Collection<SystemIndexDescriptor> getSystemIndexDescriptors(Settings settings) {
+    List<SystemIndexDescriptor> systemIndexDescriptors = new ArrayList<>();
+    systemIndexDescriptors.add(
+        new SystemIndexDescriptor(
+            OpenSearchDataSourceMetadataStorage.DATASOURCE_INDEX_NAME, "SQL DataSources index"));
+    systemIndexDescriptors.add(
+        new SystemIndexDescriptor(
+            SPARK_REQUEST_BUFFER_INDEX_NAME + "*", "SQL Spark Request Buffer index pattern"));
+    return systemIndexDescriptors;
+  }
+}

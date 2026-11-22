@@ -1,0 +1,29 @@
+exceptions:
+  TooGenericExceptionCaught:
+    active: false
+  SwallowedException: # Detekt fails to pick up the logger, and produces too many false positives for this rule
+    active: false
+
+style:
+  ForbiddenComment:
+    active: false
+  MaxLineLength:
+    maxLineLength: 160
+    excludes: ['**/test/**']
+  FunctionOnlyReturningConstant:
+    active: false
+  UseRequire:
+    active: false
+  UnusedPrivateProperty:
+    active: false
+
+complexity:
+  LargeClass:
+    excludes: ['**/test/**']
+  LongMethod:
+    allowedLines: 80
+    excludes: ['**/test/**']
+  LongParameterList:
+    excludes: ['**/test/**']
+  NestedBlockDepth:
+    allowedDepth: 5

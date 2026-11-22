@@ -1,0 +1,99 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.indexmanagement.indexstatemanagement.action
+
+import org.opensearch.Version
+import org.opensearch.common.unit.TimeValue
+import org.opensearch.core.common.io.stream.StreamOutput
+import org.opensearch.core.common.unit.ByteSizeValue
+import org.opensearch.core.xcontent.ToXContent
+import org.opensearch.core.xcontent.XContentBuilder
+import org.opensearch.indexmanagement.indexstatemanagement.step.rollover.AttemptRolloverStep
+import org.opensearch.indexmanagement.spi.indexstatemanagement.Action
+import org.opensearch.indexmanagement.spi.indexstatemanagement.Step
+import org.opensearch.indexmanagement.spi.indexstatemanagement.model.StepContext
+
+class RolloverAction(
+    val minSize: ByteSizeValue?,
+    val minDocs: Long?,
+    val minAge: TimeValue?,
+    val minPrimaryShardSize: ByteSizeValue?,
+    val copyAlias: Boolean = false,
+    val preventEmptyRollover: Boolean = false,
+    val conditionGroups: List<RolloverConditionGroup>? = null,
+    index: Int,
+) : Action(name, index) {
+    init {
+        if (minSize != null) require(minSize.bytes > 0) { "RolloverAction minSize value must be greater than 0" }
+
+        if (minPrimaryShardSize != null) {
+            require(minPrimaryShardSize.bytes > 0) {
+                "RolloverActionConfig minPrimaryShardSize value must be greater than 0"
+            }
+        }
+        if (minDocs != null) require(minDocs > 0) { "RolloverAction minDocs value must be greater than 0" }
+
+        val hasFlatConditions = minSize != null || minDocs != null || minAge != null || minPrimaryShardSize != null
+        val hasGroups = !conditionGroups.isNullOrEmpty()
+        require(!(hasFlatConditions && hasGroups)) {
+            "RolloverAction cannot specify both flat conditions and [$ANY_OF_FIELD] groups"
+        }
+        require(conditionGroups == null || conditionGroups.isNotEmpty()) {
+            "RolloverAction [$ANY_OF_FIELD] must contain at least one condition group"
+        }
+    }
+
+    private val attemptRolloverStep = AttemptRolloverStep(this)
+    private val steps = listOf(attemptRolloverStep)
+
+    override fun getStepToExecute(context: StepContext): Step = attemptRolloverStep
+
+    override fun getSteps(): List<Step> = steps
+
+    override fun populateAction(builder: XContentBuilder, params: ToXContent.Params) {
+        builder.startObject(type)
+        if (!conditionGroups.isNullOrEmpty()) {
+            builder.startArray(ANY_OF_FIELD)
+            conditionGroups.forEach { it.toXContent(builder, params) }
+            builder.endArray()
+        } else {
+            if (minSize != null) builder.field(MIN_SIZE_FIELD, minSize.stringRep)
+            if (minDocs != null) builder.field(MIN_DOC_COUNT_FIELD, minDocs)
+            if (minAge != null) builder.field(MIN_INDEX_AGE_FIELD, minAge.stringRep)
+            if (minPrimaryShardSize != null) builder.field(MIN_PRIMARY_SHARD_SIZE_FIELD, minPrimaryShardSize.stringRep)
+        }
+        builder.field(COPY_ALIAS_FIELD, copyAlias)
+        if (preventEmptyRollover) builder.field(PREVENT_EMPTY_ROLLOVER_FIELD, preventEmptyRollover)
+        builder.endObject()
+    }
+
+    override fun populateAction(out: StreamOutput) {
+        out.writeOptionalWriteable(minSize)
+        out.writeOptionalLong(minDocs)
+        out.writeOptionalTimeValue(minAge)
+        out.writeOptionalWriteable(minPrimaryShardSize)
+        out.writeBoolean(copyAlias)
+        if (out.version.onOrAfter(Version.V_3_4_0)) {
+            out.writeBoolean(preventEmptyRollover)
+        }
+        if (out.version.onOrAfter(Version.V_3_7_0)) {
+            out.writeBoolean(conditionGroups != null)
+            if (conditionGroups != null) out.writeList(conditionGroups)
+        }
+        out.writeInt(actionIndex)
+    }
+
+    companion object {
+        const val name = "rollover"
+        const val MIN_SIZE_FIELD = "min_size"
+        const val MIN_DOC_COUNT_FIELD = "min_doc_count"
+        const val MIN_INDEX_AGE_FIELD = "min_index_age"
+        const val MIN_PRIMARY_SHARD_SIZE_FIELD = "min_primary_shard_size"
+        const val COPY_ALIAS_FIELD = "copy_alias"
+        const val PREVENT_EMPTY_ROLLOVER_FIELD = "prevent_empty_rollover"
+        const val ANY_OF_FIELD = "any_of"
+    }
+}

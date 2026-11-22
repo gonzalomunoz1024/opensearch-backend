@@ -1,0 +1,38 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.sql.legacy.executor;
+
+import com.google.common.collect.ImmutableMap;
+import java.util.Map;
+import java.util.Optional;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+
+@RequiredArgsConstructor
+public enum Format {
+  JDBC("jdbc"),
+  CSV("csv"),
+  RAW("raw"),
+  TABLE("table");
+
+  @Getter private final String formatName;
+
+  public static final Map<String, Format> RESPONSE_FORMATS;
+
+  static {
+    ImmutableMap.Builder<String, Format> builder;
+    builder = new ImmutableMap.Builder<>();
+    builder.put(JDBC.formatName, JDBC);
+    builder.put(CSV.formatName, CSV);
+    builder.put(RAW.formatName, RAW);
+    builder.put(TABLE.formatName, TABLE);
+    RESPONSE_FORMATS = builder.build();
+  }
+
+  public static Optional<Format> of(String formatName) {
+    return Optional.ofNullable(RESPONSE_FORMATS.getOrDefault(formatName, null));
+  }
+}

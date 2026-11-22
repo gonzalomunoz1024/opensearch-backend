@@ -1,0 +1,52 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.indexmanagement.snapshotmanagement.model
+
+import org.opensearch.Version
+import org.opensearch.core.common.io.stream.StreamInput
+import org.opensearch.core.common.io.stream.StreamOutput
+import org.opensearch.core.common.io.stream.Writeable
+import org.opensearch.core.xcontent.ToXContent
+import org.opensearch.core.xcontent.ToXContentFragment
+import org.opensearch.core.xcontent.XContentBuilder
+import org.opensearch.indexmanagement.opensearchapi.optionalField
+import java.io.IOException
+
+data class ExplainSMPolicy(
+    val metadata: SMMetadata? = null,
+    val enabled: Boolean? = null,
+) : ToXContentFragment,
+    Writeable {
+    @Throws(IOException::class)
+    constructor(sin: StreamInput) : this(
+        metadata = if (sin.readBoolean()) SMMetadata(sin) else null,
+        enabled = sin.readOptionalBoolean(),
+    )
+
+    @Throws(IOException::class)
+    override fun writeTo(out: StreamOutput) {
+        out.writeBoolean(metadata != null)
+        metadata?.writeTo(out)
+        out.writeOptionalBoolean(enabled)
+    }
+
+    @Throws(IOException::class)
+    override fun toXContent(builder: XContentBuilder, params: ToXContent.Params): XContentBuilder {
+        metadata?.let {
+            builder
+                .optionalField(SMMetadata.DELETION_FIELD, it.deletion)
+                .field(SMMetadata.POLICY_SEQ_NO_FIELD, it.policySeqNo)
+                .field(SMMetadata.POLICY_PRIMARY_TERM_FIELD, it.policyPrimaryTerm)
+
+            if (Version.CURRENT.onOrAfter(Version.V_3_3_0)) {
+                builder.optionalField(SMMetadata.CREATION_FIELD, it.creation)
+            } else {
+                builder.field(SMMetadata.CREATION_FIELD, it.creation)
+            }
+        }
+        return builder.field(SMPolicy.ENABLED_FIELD, enabled)
+    }
+}

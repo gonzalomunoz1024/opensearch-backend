@@ -1,0 +1,33 @@
+## Overview
+
+This document contains a list of maintainers in this repo. See [opensearch-project/.github/RESPONSIBILITIES.md](https://github.com/opensearch-project/.github/blob/main/RESPONSIBILITIES.md#maintainer-responsibilities) that explains what the role of maintainer means, what maintainers do in this and other repos, and how they should be doing it. If you're interested in contributing, and becoming a maintainer, see [CONTRIBUTING](CONTRIBUTING.md).
+
+## Current Maintainers
+
+| Maintainer            | GitHub ID                                         | Affiliation |
+|-----------------------|---------------------------------------------------|-------------|
+| Ashish Agrawal        | [lezzago](https://github.com/lezzago)             | Amazon      |
+| Bowen Lan             | [bowenlan-amzn](https://github.com/bowenlan-amzn) | Amazon      |
+| Rishabh Maurya        | [rishabhmaurya](https://github.com/rishabhmaurya) | Amazon      |
+| Saurabh Singh         | [getsaurabh02](https://github.com/getsaurabh02)   | Amazon      |
+| Surya Sashank Nistala | [eirsep](https://github.com/eirsep)               | Amazon      |
+| Thomas Hurney         | [AWSHurneyt](https://github.com/AWSHurneyt)       | Amazon      |
+| Chase Engelbrecht     | [engechas](https://github.com/engechas)           | Amazon      |
+| Riya Saxena           | [riysaxen-amzn](https://github.com/riysaxen-amzn) | Amazon      |
+| Craig Perkins         | [cwperks](https://github.com/cwperks)             | Amazon      |
+| Dennis Toepker        | [toepkerd](https://github.com/toepkerd)           | Amazon      |
+| Sai Vikhyath          | [vikhy-aws](https://github.com/vikhy-aws)         | Amazon      |
+| Manaswini Ragamouni   | [manaswini1920](https://github.com/manaswini1920) | Amazon      |
+| Nishtha Mehrotra            | [nishtham-amazon](https://github.com/nishtham-amazon) | Amazon   |
+| Kash Kondaka         | [KashKondaka](https://github.com/KashKondaka)     | Amazon      |
+
+
+## Emeritus
+
+| Maintainer    | GitHub ID                                         | Affiliation |
+|---------------|---------------------------------------------------|-------------|
+| Annie Lee     | [leeyun-amzn](https://github.com/leeyun-amzn)     | Amazon      |
+| Sriram Kosuri | [skkosuri-amzn](https://github.com/skkosuri-amzn) | Amazon      |
+| Mohammad Qureshi      | [qreshi](https://github.com/qreshi)       | Amazon      |
+| Subhobrata Dey        | [sbcd90](https://github.com/sbcd90)               | Amazon      |
+| Joanne Wang           | [jowg-amazon](https://github.com/jowg-amazon)     | Amazon      |

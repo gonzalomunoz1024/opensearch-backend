@@ -1,0 +1,533 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package org.opensearch.sql.calcite.utils;
+
+import static org.opensearch.sql.calcite.utils.OpenSearchTypeFactory.ExprUDT.EXPR_DATE;
+import static org.opensearch.sql.calcite.utils.OpenSearchTypeFactory.ExprUDT.EXPR_TIME;
+import static org.opensearch.sql.calcite.utils.OpenSearchTypeFactory.ExprUDT.EXPR_TIMESTAMP;
+import static org.opensearch.sql.data.type.ExprCoreType.ARRAY;
+import static org.opensearch.sql.data.type.ExprCoreType.BINARY;
+import static org.opensearch.sql.data.type.ExprCoreType.BOOLEAN;
+import static org.opensearch.sql.data.type.ExprCoreType.BYTE;
+import static org.opensearch.sql.data.type.ExprCoreType.DATE;
+import static org.opensearch.sql.data.type.ExprCoreType.DOUBLE;
+import static org.opensearch.sql.data.type.ExprCoreType.FLOAT;
+import static org.opensearch.sql.data.type.ExprCoreType.GEO_POINT;
+import static org.opensearch.sql.data.type.ExprCoreType.INTEGER;
+import static org.opensearch.sql.data.type.ExprCoreType.INTERVAL;
+import static org.opensearch.sql.data.type.ExprCoreType.IP;
+import static org.opensearch.sql.data.type.ExprCoreType.LONG;
+import static org.opensearch.sql.data.type.ExprCoreType.SHORT;
+import static org.opensearch.sql.data.type.ExprCoreType.STRING;
+import static org.opensearch.sql.data.type.ExprCoreType.STRUCT;
+import static org.opensearch.sql.data.type.ExprCoreType.TIME;
+import static org.opensearch.sql.data.type.ExprCoreType.TIMESTAMP;
+import static org.opensearch.sql.data.type.ExprCoreType.UNDEFINED;
+import static org.opensearch.sql.data.type.ExprCoreType.UNKNOWN;
+import static org.opensearch.sql.executor.QueryType.PPL;
+import static org.opensearch.sql.lang.PPLLangSpec.PPL_SPEC;
+
+import java.lang.reflect.Type;
+import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Map.Entry;
+import lombok.Getter;
+import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeSystem;
+import org.apache.calcite.sql.SqlCollation;
+import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.type.SqlTypeUtil;
+import org.checkerframework.checker.nullness.qual.Nullable;
+import org.opensearch.analytics.schema.BinaryType;
+import org.opensearch.analytics.schema.DateOnlyType;
+import org.opensearch.analytics.schema.IpType;
+import org.opensearch.analytics.schema.TimeOnlyType;
+import org.opensearch.sql.calcite.type.AbstractExprRelDataType;
+import org.opensearch.sql.calcite.type.ExprBinaryType;
+import org.opensearch.sql.calcite.type.ExprDateType;
+import org.opensearch.sql.calcite.type.ExprIPType;
+import org.opensearch.sql.calcite.type.ExprTimeStampType;
+import org.opensearch.sql.calcite.type.ExprTimeType;
+import org.opensearch.sql.data.model.ExprValue;
+import org.opensearch.sql.data.model.ExprValueUtils;
+import org.opensearch.sql.data.type.ExprCoreType;
+import org.opensearch.sql.data.type.ExprType;
+import org.opensearch.sql.executor.OpenSearchTypeSystem;
+import org.opensearch.sql.executor.QueryType;
+import org.opensearch.sql.storage.Table;
+
+/** This class is used to create RelDataType and map RelDataType to Java data type */
+public class OpenSearchTypeFactory extends JavaTypeFactoryImpl {
+  public static final OpenSearchTypeFactory TYPE_FACTORY =
+      new OpenSearchTypeFactory(OpenSearchTypeSystem.INSTANCE);
+
+  private OpenSearchTypeFactory(RelDataTypeSystem typeSystem) {
+    super(typeSystem);
+  }
+
+  @Getter
+  public enum ExprUDT {
+    EXPR_DATE(DATE),
+    EXPR_TIME(TIME),
+    EXPR_TIMESTAMP(TIMESTAMP),
+    EXPR_BINARY(BINARY),
+    EXPR_IP(IP);
+
+    // Associated `ExprCoreType`
+    private final ExprCoreType exprCoreType;
+
+    ExprUDT(ExprCoreType exprCoreType) {
+      this.exprCoreType = exprCoreType;
+    }
+  }
+
+  @Override
+  public RelDataType createTypeWithNullability(RelDataType type, boolean nullable) {
+    if (type instanceof AbstractExprRelDataType<?> udt) {
+      return udt.createWithNullability(this, nullable);
+    }
+    return super.createTypeWithNullability(type, nullable);
+  }
+
+  @Override
+  public RelDataType createTypeWithCharsetAndCollation(
+      RelDataType type, Charset charset, SqlCollation collation) {
+    if (type instanceof AbstractExprRelDataType<?> udt) {
+      return udt.createWithCharsetAndCollation(this, charset, collation);
+    }
+    return super.createTypeWithCharsetAndCollation(type, charset, collation);
+  }
+
+  public RelDataType createSqlType(SqlTypeName typeName, boolean nullable) {
+    return createTypeWithNullability(super.createSqlType(typeName), nullable);
+  }
+
+  public RelDataType createStructType(
+      List<RelDataType> typeList, List<String> fieldNameList, boolean nullable) {
+    return createTypeWithNullability(super.createStructType(typeList, fieldNameList), nullable);
+  }
+
+  public RelDataType createMultisetType(RelDataType type, long maxCardinality, boolean nullable) {
+    return createTypeWithNullability(super.createMultisetType(type, maxCardinality), nullable);
+  }
+
+  public RelDataType createMapType(RelDataType keyType, RelDataType valueType, boolean nullable) {
+    return createTypeWithNullability(super.createMapType(keyType, valueType), nullable);
+  }
+
+  public RelDataType createUDT(ExprUDT typeName) {
+    RelDataType udt =
+        switch (typeName) {
+          case EXPR_DATE:
+            yield new ExprDateType(this);
+          case EXPR_TIME:
+            yield new ExprTimeType(this);
+          case EXPR_TIMESTAMP:
+            yield new ExprTimeStampType(this);
+          case EXPR_BINARY:
+            yield new ExprBinaryType(this);
+          case EXPR_IP:
+            yield new ExprIPType(this);
+        };
+    return canonize(SqlTypeUtil.addCharsetAndCollation(udt, this));
+  }
+
+  public RelDataType createUDT(ExprUDT typeName, boolean nullable) {
+    return this.createTypeWithNullability(createUDT(typeName), nullable);
+  }
+
+  public static RelDataType convertExprTypeToRelDataType(ExprType field) {
+    return convertExprTypeToRelDataType(field, true);
+  }
+
+  /** Converts a OpenSearch ExprCoreType field to relational type. */
+  public static RelDataType convertExprTypeToRelDataType(ExprType fieldType, boolean nullable) {
+    if (fieldType instanceof ExprCoreType) {
+      switch ((ExprCoreType) fieldType) {
+        case UNDEFINED:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.NULL, nullable);
+        case BYTE:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.TINYINT, nullable);
+        case SHORT:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.SMALLINT, nullable);
+        case INTEGER:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.INTEGER, nullable);
+        case LONG:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.BIGINT, nullable);
+        case FLOAT:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.REAL, nullable);
+        case DOUBLE:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.DOUBLE, nullable);
+        case IP:
+          return TYPE_FACTORY.createUDT(ExprUDT.EXPR_IP, nullable);
+        case STRING:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.VARCHAR, nullable);
+        case BOOLEAN:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.BOOLEAN, nullable);
+        case DATE:
+          return TYPE_FACTORY.createUDT(ExprUDT.EXPR_DATE, nullable);
+        case TIME:
+          return TYPE_FACTORY.createUDT(ExprUDT.EXPR_TIME, nullable);
+        case TIMESTAMP:
+          return TYPE_FACTORY.createUDT(ExprUDT.EXPR_TIMESTAMP, nullable);
+        case BINARY:
+          return TYPE_FACTORY.createSqlType(SqlTypeName.VARBINARY, nullable);
+        case ARRAY:
+          return TYPE_FACTORY.createArrayType(
+              TYPE_FACTORY.createSqlType(SqlTypeName.ANY, nullable), -1);
+        case STRUCT:
+          final RelDataType relKey = TYPE_FACTORY.createSqlType(SqlTypeName.VARCHAR);
+          // TODO: should we provide more precise type here?
+          return TYPE_FACTORY.createMapType(
+              relKey, TYPE_FACTORY.createSqlType(SqlTypeName.ANY), nullable);
+        case UNKNOWN:
+        default:
+          throw new IllegalArgumentException(
+              "Unsupported conversion for OpenSearch Data type: " + fieldType.typeName());
+      }
+    } else {
+      if (fieldType.legacyTypeName().equalsIgnoreCase("binary")) {
+        return TYPE_FACTORY.createUDT(ExprUDT.EXPR_BINARY, nullable);
+      } else if (fieldType.legacyTypeName().equalsIgnoreCase("timestamp")) {
+        return TYPE_FACTORY.createUDT(ExprUDT.EXPR_TIMESTAMP, nullable);
+      } else if (fieldType.legacyTypeName().equalsIgnoreCase("date")) {
+        return TYPE_FACTORY.createUDT(ExprUDT.EXPR_DATE, nullable);
+      } else if (fieldType.legacyTypeName().equalsIgnoreCase("time")) {
+        return TYPE_FACTORY.createUDT(ExprUDT.EXPR_TIME, nullable);
+      } else if (fieldType.legacyTypeName().equalsIgnoreCase("geo_point")) {
+        return TYPE_FACTORY.createSqlType(SqlTypeName.GEOMETRY, nullable);
+      } else if (fieldType.legacyTypeName().equalsIgnoreCase("text")) {
+        return TYPE_FACTORY.createSqlType(SqlTypeName.VARCHAR, nullable);
+      } else if (fieldType.legacyTypeName().equalsIgnoreCase("ip")) {
+        return TYPE_FACTORY.createUDT(ExprUDT.EXPR_IP, nullable);
+      } else if (fieldType.getOriginalPath().isPresent()) {
+        return convertExprTypeToRelDataType(fieldType.getOriginalExprType(), nullable);
+      } else {
+        throw new IllegalArgumentException(
+            "Unsupported conversion for OpenSearch Data type: " + fieldType.typeName());
+      }
+    }
+  }
+
+  /**
+   * Usually, {@link this#createSqlType(SqlTypeName, boolean)} is used to create RelDataType, then
+   * convert it to ExprType. This is a util to convert when you don't have typeFactory. So they are
+   * all ExprCoreType.
+   */
+  public static ExprType convertSqlTypeNameToExprType(SqlTypeName sqlTypeName) {
+    return switch (sqlTypeName) {
+      case TINYINT -> BYTE;
+      case SMALLINT -> SHORT;
+      case INTEGER -> INTEGER;
+      case BIGINT -> LONG;
+      case FLOAT, REAL -> FLOAT;
+      case DOUBLE, DECIMAL -> DOUBLE; // TODO the decimal is only used for literal
+      case CHAR, VARCHAR, MULTISET -> STRING; // call toString() for MULTISET
+      case VARBINARY, BINARY -> BINARY;
+      case BOOLEAN -> BOOLEAN;
+      case DATE -> DATE;
+      case TIME, TIME_TZ, TIME_WITH_LOCAL_TIME_ZONE -> TIME;
+      case TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE, TIMESTAMP_TZ -> TIMESTAMP;
+      case INTERVAL_YEAR,
+          INTERVAL_YEAR_MONTH,
+          INTERVAL_MONTH,
+          INTERVAL_DAY,
+          INTERVAL_DAY_HOUR,
+          INTERVAL_DAY_MINUTE,
+          INTERVAL_DAY_SECOND,
+          INTERVAL_HOUR,
+          INTERVAL_HOUR_MINUTE,
+          INTERVAL_HOUR_SECOND,
+          INTERVAL_MINUTE,
+          INTERVAL_MINUTE_SECOND,
+          INTERVAL_SECOND ->
+          INTERVAL;
+      case ARRAY -> ARRAY;
+      case MAP -> STRUCT;
+      // Calcite spells a struct as ROW. convertExprTypeToRelDataType builds STRUCT as
+      // MAP<VARCHAR, ANY> since the v2 path only passes _source JSON through, so a genuine ROW —
+      // from an engine that builds a struct out of typed columns — matched nothing and fell
+      // through to UNKNOWN.
+      case ROW -> STRUCT;
+      case GEOMETRY -> GEO_POINT;
+      case NULL, ANY, OTHER -> UNDEFINED;
+      default -> UNKNOWN;
+    };
+  }
+
+  /** Get legacy name for a RelDataType. */
+  public static String getLegacyTypeName(RelDataType relDataType, QueryType queryType) {
+    ExprType type = convertRelDataTypeToExprType(relDataType);
+    return (queryType == PPL ? PPL_SPEC.typeName(type) : type.legacyTypeName())
+        .toUpperCase(Locale.ROOT);
+  }
+
+  /**
+   * Name a multi-value type the way a query author sees it in a mapping, for error messages:
+   * "object" for an object field, "array" for an array one. Returns null for scalar types.
+   */
+  public static @Nullable String getContainerTypeName(RelDataType relDataType) {
+    return switch (relDataType.getSqlTypeName()) {
+      case MAP, ROW -> "object";
+      case ARRAY, MULTISET -> "array";
+      default -> null;
+    };
+  }
+
+  /** Converts a Calcite data type to OpenSearch ExprCoreType. */
+  public static ExprType convertRelDataTypeToExprType(RelDataType type) {
+    if (isUserDefinedType(type)) {
+      AbstractExprRelDataType<?> udt = (AbstractExprRelDataType<?>) type;
+      return udt.getExprType();
+    }
+    ExprType exprType = convertSqlTypeNameToExprType(type.getSqlTypeName());
+    if (exprType == UNKNOWN) {
+      throw new IllegalArgumentException(
+          "Unsupported conversion for Relational Data type: " + type.getSqlTypeName());
+    }
+    return exprType;
+  }
+
+  /** DATE check for return-type inference; recognizes the analytics-route {@link DateOnlyType}. */
+  public static boolean isDateExprType(RelDataType type) {
+    return type instanceof DateOnlyType || convertRelDataTypeToExprType(type) == ExprCoreType.DATE;
+  }
+
+  /** TIME counterpart of {@link #isDateExprType}; recognizes {@link TimeOnlyType}. */
+  public static boolean isTimeExprType(RelDataType type) {
+    return type instanceof TimeOnlyType || convertRelDataTypeToExprType(type) == ExprCoreType.TIME;
+  }
+
+  /**
+   * Result-schema-only variant of {@link #convertRelDataTypeToExprType} that recognizes the
+   * analytics-engine {@link IpType} / {@link BinaryType} markers as {@link ExprCoreType#IP} /
+   * {@link ExprCoreType#BINARY}.
+   *
+   * <p>Kept off the general path because Calcite's planner-internal coercion would round-trip
+   * through {@link #convertExprTypeToRelDataType} and synthesize {@code CAST(... AS ExprIPType)}
+   * casts the substrait converter can't handle.
+   */
+  public static ExprType convertAnalyticsEngineRelDataTypeToExprType(RelDataType type) {
+    if (type instanceof IpType) {
+      return IP;
+    }
+    if (type instanceof BinaryType) {
+      return BINARY;
+    }
+    // span() over date / time UDT — schema label is DATE / TIME, not TIMESTAMP.
+    if (type instanceof DateOnlyType) {
+      return DATE;
+    }
+    if (type instanceof TimeOnlyType) {
+      return TIME;
+    }
+    return convertRelDataTypeToExprType(type);
+  }
+
+  public static ExprValue getExprValueByExprType(ExprType type, Object value) {
+    switch (type) {
+      case UNDEFINED:
+        return ExprValueUtils.nullValue();
+      case BYTE:
+        return ExprValueUtils.byteValue((Byte) value);
+      case SHORT:
+        return ExprValueUtils.shortValue((Short) value);
+      case INTEGER:
+        return ExprValueUtils.integerValue((Integer) value);
+      case LONG:
+        return ExprValueUtils.longValue((Long) value);
+      case FLOAT:
+        return ExprValueUtils.floatValue((Float) value);
+      case DOUBLE:
+        return ExprValueUtils.doubleValue((Double) value);
+      case STRING:
+        return ExprValueUtils.stringValue((String) value);
+      case BOOLEAN:
+        return ExprValueUtils.booleanValue((Boolean) value);
+      case DATE:
+      case TIME:
+      case TIMESTAMP:
+        return ExprValueUtils.fromObjectValue(value);
+      case IP:
+        return ExprValueUtils.ipValue((String) value);
+      case ARRAY:
+        return ExprValueUtils.collectionValue((List<Object>) value);
+      case STRUCT:
+        return ExprValueUtils.tupleValue((Map<String, Object>) value);
+      default:
+        throw new IllegalArgumentException(
+            "Unsupported conversion for OpenSearch Data type: " + type.typeName());
+    }
+  }
+
+  public static RelDataType convertSchema(Table table) {
+    List<String> fieldNameList = new ArrayList<>();
+    List<RelDataType> typeList = new ArrayList<>();
+    Map<String, ExprType> fieldTypes = new LinkedHashMap<>(table.getFieldTypes());
+    fieldTypes.putAll(table.getReservedFieldTypes());
+    for (Entry<String, ExprType> entry : fieldTypes.entrySet()) {
+      // skip alias type fields when constructing schema
+      if (entry.getValue().getOriginalPath().isPresent()) continue;
+      fieldNameList.add(entry.getKey());
+      typeList.add(OpenSearchTypeFactory.convertExprTypeToRelDataType(entry.getValue()));
+    }
+    return TYPE_FACTORY.createStructType(typeList, fieldNameList, true);
+  }
+
+  /** not in use for now, but let's keep this code for future reference. */
+  @Override
+  public Type getJavaClass(RelDataType type) {
+    if (type instanceof AbstractExprRelDataType<?> exprRelDataType) {
+      return exprRelDataType.getJavaType();
+    }
+    return super.getJavaClass(type);
+  }
+
+  /**
+   * Whether a given RelDataType is a user-defined type (UDT)
+   *
+   * @param type the RelDataType to check
+   * @return true if the type is a user-defined type, false otherwise
+   */
+  public static boolean isUserDefinedType(RelDataType type) {
+    return type instanceof AbstractExprRelDataType<?>;
+  }
+
+  /**
+   * Checks if the RelDataType represents a numeric type. Supports standard SQL numeric types
+   * (INTEGER, BIGINT, SMALLINT, TINYINT, FLOAT, DOUBLE, DECIMAL, REAL), OpenSearch UDT numeric
+   * types, and string types (VARCHAR, CHAR).
+   *
+   * @param fieldType the RelDataType to check
+   * @return true if the type is numeric or string, false otherwise
+   */
+  public static boolean isNumericType(RelDataType fieldType) {
+    // Check standard SQL numeric types
+    SqlTypeName sqlType = fieldType.getSqlTypeName();
+    if (sqlType == SqlTypeName.INTEGER
+        || sqlType == SqlTypeName.BIGINT
+        || sqlType == SqlTypeName.SMALLINT
+        || sqlType == SqlTypeName.TINYINT
+        || sqlType == SqlTypeName.FLOAT
+        || sqlType == SqlTypeName.DOUBLE
+        || sqlType == SqlTypeName.DECIMAL
+        || sqlType == SqlTypeName.REAL) {
+      return true;
+    }
+
+    // Check string types (VARCHAR, CHAR)
+    if (sqlType == SqlTypeName.VARCHAR || sqlType == SqlTypeName.CHAR) {
+      return true;
+    }
+
+    // Check for OpenSearch UDT numeric types
+    if (isUserDefinedType(fieldType)) {
+      AbstractExprRelDataType<?> exprType = (AbstractExprRelDataType<?>) fieldType;
+      ExprType udtType = exprType.getExprType();
+      return ExprCoreType.numberTypes().contains(udtType);
+    }
+
+    return false;
+  }
+
+  /**
+   * Preserves OpenSearch UDT types through set operations (UNION, INTERSECT, EXCEPT). When all
+   * input types share the same {@link AbstractExprRelDataType} with the same {@link
+   * AbstractExprRelDataType#getUdt() UDT}, the result retains the UDT wrapper instead of being
+   * downgraded to the underlying SQL type (e.g., VARCHAR). This is critical for operations like
+   * multisearch that use UNION ALL, where downstream operators (bin, span) rely on the UDT type to
+   * determine how to process the field. When inputs include non-UDT types or different UDTs, this
+   * method falls back to {@link super#leastRestrictive}.
+   *
+   * @param types the list of input {@link RelDataType} instances to find the least restrictive
+   *     common type for
+   * @return the least restrictive {@link RelDataType} preserving the UDT wrapper when all inputs
+   *     share the same UDT, or {@code null} if no common type exists (as determined by {@link
+   *     super#leastRestrictive})
+   */
+  @Override
+  public @Nullable RelDataType leastRestrictive(List<RelDataType> types) {
+    if (types.size() > 1) {
+      RelDataType first = types.get(0);
+      if (first instanceof AbstractExprRelDataType<?> firstUdt) {
+        boolean anyNullable = false;
+        for (RelDataType t : types) {
+          if (t instanceof AbstractExprRelDataType<?> udt && udt.getUdt() == firstUdt.getUdt()) {
+            anyNullable |= t.isNullable();
+          } else {
+            return super.leastRestrictive(types);
+          }
+        }
+        if (anyNullable && !first.isNullable()) {
+          return firstUdt.createWithNullability(this, true);
+        }
+        return first;
+      }
+      // When the list has a VARBINARY column plus VARCHAR literals, treat VARBINARY
+      // as the common type so IN / BETWEEN can insert casts.
+      RelDataType varbinaryResult = leastRestrictiveVarbinaryVarchar(types);
+      if (varbinaryResult != null) {
+        return varbinaryResult;
+      }
+    }
+    return super.leastRestrictive(types);
+  }
+
+  private @Nullable RelDataType leastRestrictiveVarbinaryVarchar(List<RelDataType> types) {
+    boolean hasVarbinary = false;
+    boolean anyNullable = false;
+    for (RelDataType t : types) {
+      SqlTypeName name = t.getSqlTypeName();
+      if (name == SqlTypeName.VARBINARY) {
+        hasVarbinary = true;
+      } else if (name != SqlTypeName.VARCHAR && name != SqlTypeName.CHAR) {
+        return null;
+      }
+      anyNullable |= t.isNullable();
+    }
+    if (!hasVarbinary) {
+      return null;
+    }
+    return createTypeWithNullability(createSqlType(SqlTypeName.VARBINARY), anyNullable);
+  }
+
+  /**
+   * Checks if the RelDataType represents a time-based field (timestamp, date, or time). Supports
+   * both standard SQL time types (including TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE, DATE, TIME,
+   * and their timezone variants) and OpenSearch UDT time types.
+   *
+   * @param fieldType the RelDataType to check
+   * @return true if the type is time-based, false otherwise
+   */
+  public static boolean isTimeBasedType(RelDataType fieldType) {
+    // Check standard SQL time types
+    SqlTypeName sqlType = fieldType.getSqlTypeName();
+    if (sqlType == SqlTypeName.TIMESTAMP
+        || sqlType == SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE
+        || sqlType == SqlTypeName.DATE
+        || sqlType == SqlTypeName.TIME
+        || sqlType == SqlTypeName.TIME_WITH_LOCAL_TIME_ZONE) {
+      return true;
+    }
+
+    // Check for OpenSearch UDT types (EXPR_TIMESTAMP mapped to VARCHAR)
+    if (isUserDefinedType(fieldType)) {
+      AbstractExprRelDataType<?> exprType = (AbstractExprRelDataType<?>) fieldType;
+      ExprType udtType = exprType.getExprType();
+      return udtType == ExprCoreType.TIMESTAMP
+          || udtType == ExprCoreType.DATE
+          || udtType == ExprCoreType.TIME;
+    }
+
+    // Fallback check if type string contains EXPR_TIMESTAMP
+    return fieldType.toString().contains("EXPR_TIMESTAMP");
+  }
+}

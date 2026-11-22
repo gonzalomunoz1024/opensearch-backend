@@ -1,0 +1,4 @@
+# These trees are copies of other repositories. Keep every file byte for byte: the rule
+# at the top of this repository (* text eol=lf) would otherwise rewrite line endings
+# inside their images and other binary files.
+* -text

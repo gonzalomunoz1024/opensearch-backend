@@ -1,0 +1,187 @@
+name: Test and Build Workflow
+on:
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches:
+      - "**"
+
+jobs:
+  Get-CI-Image-Tag:
+    uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@main
+    with:
+      product: opensearch
+
+  test-and-build-linux:
+    needs: Get-CI-Image-Tag
+    timeout-minutes: 25
+    env:
+      TEST_FILTER: ${{ matrix.test_filter }}
+    strategy:
+      # This setting says that all jobs should finish, even if one fails
+      fail-fast: false
+      # This starts three jobs, setting these environment variables uniquely for the different jobs
+      matrix:
+        java: [21, 25]
+        feature: [ism, non-ism]
+        include:
+          - feature: ism
+            test_filter: -PincludeTests="org.opensearch.indexmanagement.indexstatemanagement*"
+          - feature: non-ism
+            test_filter: -PexcludeTests="org.opensearch.indexmanagement.indexstatemanagement*"
+    runs-on: ubuntu-latest
+    container:
+      # using the same image which is used by opensearch-build team to build the OpenSearch Distribution
+      # this image tag is subject to change as more dependencies and updates will arrive over time
+      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
+      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
+
+    steps:
+      - name: Run start commands
+        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
+      # This step uses the setup-java Github action: https://github.com/actions/setup-java
+      - name: Set Up JDK ${{ matrix.java }}
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin # Temurin is a distribution of adoptium
+          java-version: ${{ matrix.java }}
+      # build index management
+      - name: Checkout Branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # This is a hack, but this step creates a link to the X: mounted drive, which makes the path
+      # short enough to work on Windows
+      - name: Build with Gradle
+        timeout-minutes: 20
+        run: |
+          chown -R 1000:1000 `pwd`
+          su `id -un 1000` -c "./gradlew build ${{ env.TEST_FILTER }}"
+      - name: Generate Jacoco Test Report
+        if: always() && matrix.java == 21
+        run: |
+          su `id -un 1000` -c "./gradlew jacocoTestReport"
+      - name: Upload coverage XML
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && matrix.java == 21
+        with:
+          name: coverage-xml-${{ matrix.java }}-${{ matrix.feature }}
+          path: build/reports/jacoco/**/jacocoTestReport.xml
+          if-no-files-found: warn
+          overwrite: 'true'
+      - name: Upload failed logs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ failure() }}
+        with:
+          name: logs-${{ matrix.java }}-${{ matrix.feature }}
+          path: build/testclusters/integTest-*/logs/*
+          overwrite: 'true'
+      - name: Upload test reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ failure() }}
+        with:
+          name: test-reports-linux-${{ matrix.java }}-${{ matrix.feature }}
+          path: build/reports/
+          overwrite: 'true'
+      - name: Create Artifact Path
+        run: |
+          mkdir -p index-management-artifacts
+          cp ./build/distributions/*.zip index-management-artifacts
+      # This step uses the upload-artifact Github action: https://github.com/actions/upload-artifact
+      - name: Upload Artifacts
+        # v4 requires node.js 20 which is not supported
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: index-management-plugin-ubuntu-latest-${{ matrix.java }}-${{ matrix.feature }}
+          path: index-management-artifacts
+          overwrite: 'true'
+
+  test-and-build-windows-macos:
+    env:
+      BUILD_ARGS: ${{ matrix.os_build_args }}
+      WORKING_DIR: ${{ matrix.working_directory }}.
+      TEST_FILTER: ${{ matrix.test_filter }}
+    strategy:
+      # This setting says that all jobs should finish, even if one fails
+      fail-fast: false
+      # This starts three jobs, setting these environment variables uniquely for the different jobs
+      matrix:
+        java: [21]
+        os: [windows-latest, macos-latest]
+        feature: [ism, non-ism]
+        include:
+          - os: windows-latest
+            os_build_args: -x integTest -x jacocoTestReport
+            working_directory: X:\
+            os_java_options: -Xmx4096M
+          - os: macos-latest
+            os_build_args: -x integTest -x jacocoTestReport
+          - feature: ism
+            test_filter: -PincludeTests="org.opensearch.indexmanagement.indexstatemanagement*"
+          - feature: non-ism
+            test_filter: -PexcludeTests="org.opensearch.indexmanagement.indexstatemanagement*"
+    runs-on: ${{ matrix.os }}
+    steps:
+      # This step uses the setup-java Github action: https://github.com/actions/setup-java
+      - name: Set Up JDK ${{ matrix.java }}
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin # Temurin is a distribution of adoptium
+          java-version: ${{ matrix.java }}
+      # build index management
+      - name: Checkout Branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # This is a hack, but this step creates a link to the X: mounted drive, which makes the path
+      # short enough to work on Windows
+      - name: Shorten Path
+        if: ${{ matrix.os == 'windows-latest' }}
+        run: subst 'X:' .
+      - name: Build with Gradle
+        working-directory: ${{ env.WORKING_DIR }}
+        run: ./gradlew build ${{ env.BUILD_ARGS }} ${{ env.TEST_FILTER }}
+        env:
+          _JAVA_OPTIONS: ${{ matrix.os_java_options }}
+      - name: Create Artifact Path
+        run: |
+          mkdir -p index-management-artifacts
+          cp ./build/distributions/*.zip index-management-artifacts
+      # This step uses the upload-artifact Github action: https://github.com/actions/upload-artifact
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: index-management-plugin-${{ matrix.os }}-${{ matrix.java }}-${{ matrix.feature }}
+          path: index-management-artifacts
+          overwrite: 'true'
+
+  report-coverage:
+    needs: ["test-and-build-linux"]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: downloaded-artifacts
+          pattern: coverage-xml-*
+
+      - name: Display structure of downloaded files
+        run: ls -R
+        working-directory: downloaded-artifacts
+
+      - name: Check if coverage files exist
+        id: check_coverage
+        run: |
+          if find downloaded-artifacts -name "*.xml" -type f | grep -q .; then
+            echo "Coverage XML files found"
+            echo "has_coverage=true" >> $GITHUB_OUTPUT
+          else
+            echo "No coverage XML files found"
+            echo "has_coverage=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Coverage
+        if: steps.check_coverage.outputs.has_coverage == 'true'
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          verbose: true

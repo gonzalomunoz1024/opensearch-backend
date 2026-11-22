@@ -1,0 +1,322 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+
+buildscript {
+    ext {
+        opensearch_version = System.getProperty("opensearch.version", "3.9.0-SNAPSHOT")
+        isSnapshot = "true" == System.getProperty("build.snapshot", "true")
+        buildVersionQualifier = System.getProperty("build.version_qualifier", "")
+        version_tokens = opensearch_version.tokenize('-')
+        opensearch_build = version_tokens[0] + '.0'
+        prometheus_binary_version = "2.37.2"
+        common_utils_version = System.getProperty("common_utils.version", opensearch_build)
+        if (buildVersionQualifier) {
+            opensearch_build += "-${buildVersionQualifier}"
+        }
+        //this variable for always downloading snapshot version of security plugin.
+        //need to figure out more elegant solution for integ tests with security.
+        opensearch_build_snapshot = opensearch_build + '-SNAPSHOT'
+        if (isSnapshot) {
+            // 2.0.0-rc1-SNAPSHOT -> 2.0.0.0-rc1-SNAPSHOT (opensearch_build)
+            opensearch_build += "-SNAPSHOT"
+        }
+        getArchType = {
+            if (System.getProperty("os.arch").startsWith("x") || System.getProperty("os.arch").startsWith("amd")) {
+                return "amd64"
+            }
+            else {
+                return "arm64"
+            }
+        }
+        getOSFamilyType = {
+            def os = org.gradle.internal.os.OperatingSystem.current();
+            if (os.isMacOsX()) {
+                return "darwin"
+            }
+            else if(os.isLinux()){
+                return "linux"
+            }
+            else if(os.isWindows()) {
+                return "windows"
+            }
+            else {
+                return os.getFamilyName().toString()
+            }
+        }
+        getPrometheusBinaryLocation = { ->
+            return "https://github.com/prometheus/prometheus/releases/download/v${prometheus_binary_version}/prometheus-${prometheus_binary_version}."+ getOSFamilyType() + "-" + getArchType() + ".tar.gz"
+        }
+        // TODO: Migrate following to Gradle version catalog || Read from OpenSearch BOM in the future.
+        // See: https://github.com/opensearch-project/sql/issues/3257
+        aws_java_sdk_version = "1.12.651"
+        calcite_version = "1.42.0"
+        guava_version = "33.3.0-jre"
+        resilience4j_version = "1.5.0"
+        hamcrest_version = "2.1"
+        mockito_version = "5.7.0"
+        commons_io_version = "2.14.0"
+        commons_text_version = "1.10.0"
+        commons_lang3_version = "3.18.0"
+        // enforce 1.13, https://www.whitesourcesoftware.com/vulnerability-database/WS-2019-0379
+        commons_codec_version = "1.13"
+        commons_logging_version = "1.2"
+    }
+
+    repositories {
+        mavenLocal()
+        maven { url "https://ci.opensearch.org/maven2/" }
+        maven { url "https://ci.opensearch.org/m2/" }
+        mavenCentral()
+        maven { url "https://ci.opensearch.org/ci/dbc/snapshots/maven/" }
+    }
+
+    dependencies {
+        classpath "org.opensearch.gradle:build-tools:${opensearch_version}"
+    }
+}
+
+plugins {
+    id "com.netflix.nebula.ospackage-base" version "12.0.0"
+    id 'java-library'
+    id "io.freefair.lombok" version "8.14"
+    id 'jacoco'
+    id 'com.diffplug.spotless' version '8.1.0'
+}
+
+// import versions defined in https://github.com/opensearch-project/OpenSearch/blob/main/buildSrc/src/main/java/org/opensearch/gradle/OpenSearchJavaPlugin.java#L94
+// versions https://github.com/opensearch-project/OpenSearch/blob/main/buildSrc/version.properties
+apply plugin: 'opensearch.java'
+apply plugin: 'opensearch.java-agent'
+
+// Repository on root level is for dependencies that project code depends on. And this block must be placed after plugins{}
+repositories {
+    mavenLocal()
+    maven {
+        url 'https://jitpack.io'
+        content { includeGroup "com.github.babbel" }
+    }
+    maven { url "https://ci.opensearch.org/ci/dbc/snapshots/maven/" }
+    maven { url "https://ci.opensearch.org/maven2/" }
+    maven { url "https://ci.opensearch.org/m2/" }
+    mavenCentral()
+}
+
+spotless {
+    java {
+        target fileTree('.') {
+            include '**/*.java'
+            exclude '**/build/**', '**/build-*/**', '**/gen/**'
+        }
+        importOrder()
+        licenseHeader("/*\n" +
+                " * Copyright OpenSearch Contributors\n" +
+                " * SPDX-License-Identifier: Apache-2.0\n" +
+                " */\n\n")
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+        googleJavaFormat('1.32.0').reflowLongStrings().groupArtifact('com.google.googlejavaformat:google-java-format')
+    }
+}
+
+allprojects {
+    version = opensearch_version.tokenize('-')[0] + '.0'
+    if (buildVersionQualifier) {
+        version += "-${buildVersionQualifier}"
+    }
+
+    if (isSnapshot) {
+        version += "-SNAPSHOT"
+    }
+
+    plugins.withId('java') {
+        java {
+            sourceCompatibility = JavaVersion.VERSION_21
+            targetCompatibility = JavaVersion.VERSION_21
+        }
+    }
+
+    tasks.withType(Test) {
+        jvmArgs '-Dnet.bytebuddy.experimental=true'
+    }
+
+    configurations.all {
+        resolutionStrategy.force "org.jetbrains.kotlin:kotlin-stdlib:1.9.10"
+        resolutionStrategy.force "net.minidev:json-smart:${versions.json_smart}"
+        resolutionStrategy.force "org.jetbrains.kotlin:kotlin-stdlib-common:1.9.10"
+        resolutionStrategy.force "net.bytebuddy:byte-buddy:1.15.11"
+        resolutionStrategy.force "org.apache.httpcomponents.client5:httpclient5:${versions.httpclient5}"
+        resolutionStrategy.force "org.apache.httpcomponents.core5:httpcore5:${versions.httpcore5}"
+        resolutionStrategy.force "org.apache.httpcomponents.core5:httpcore5-h2:${versions.httpcore5}"
+        resolutionStrategy.force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+        resolutionStrategy.force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+        resolutionStrategy.force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+        resolutionStrategy.force "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${versions.jackson}"
+        resolutionStrategy.force "com.fasterxml.jackson.dataformat:jackson-dataformat-smile:${versions.jackson}"
+        resolutionStrategy.force "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:${versions.jackson}"
+        resolutionStrategy.force 'com.google.protobuf:protobuf-java:3.25.5'
+        resolutionStrategy.force 'org.locationtech.jts:jts-core:1.19.0'
+        resolutionStrategy.force 'com.google.errorprone:error_prone_annotations:2.28.0'
+        resolutionStrategy.force 'org.checkerframework:checker-qual:3.43.0'
+        resolutionStrategy.force 'org.apache.commons:commons-lang3:3.18.0'
+        resolutionStrategy.force 'org.apache.commons:commons-text:1.11.0'
+        resolutionStrategy.force 'commons-io:commons-io:2.15.0'
+        resolutionStrategy.force 'org.yaml:snakeyaml:2.2'
+        resolutionStrategy.force "org.snakeyaml:snakeyaml-engine:${versions.snakeyaml_engine}"
+        // Align Calcite 1.42.0's bumped transitive deps under strict conflict resolution
+        resolutionStrategy.force 'com.jayway.jsonpath:json-path:2.10.0'
+        resolutionStrategy.force 'org.jooq:joou-java-6:0.9.5'
+        resolutionStrategy.force 'org.jspecify:jspecify:1.0.1'
+        resolutionStrategy.dependencySubstitution {
+            substitute module('commons-lang:commons-lang') using module('org.apache.commons:commons-lang3:3.18.0') because 'CVE-2025-48924: commons-lang 2.x vulnerable to StackOverflowError'
+        }
+    }
+}
+
+subprojects {
+    repositories {
+        mavenLocal()
+        maven {
+            url 'https://jitpack.io'
+            content { includeGroup "com.github.babbel" }
+        }
+        maven { url "https://ci.opensearch.org/ci/dbc/snapshots/maven/" }
+        maven { url "https://ci.opensearch.org/ci/dbc/snapshots/lucene/" }
+        maven { url "https://ci.opensearch.org/maven2/" }
+        maven { url "https://ci.opensearch.org/m2/" }
+        mavenCentral()
+    }
+
+    // Publish internal modules as Maven artifacts for external use, such as by opensearch-spark and opensearch-cli.
+    def publishedModules = ['api', 'sql', 'ppl', 'core', 'opensearch', 'common', 'protocol', 'datasources', 'legacy']
+    if (publishedModules.contains(name)) {
+        apply plugin: 'java-library'
+        apply plugin: 'maven-publish'
+
+        def fullArtifactId = "unified-query-${project.name}"
+        publishing {
+            publications {
+                unifiedQuery(MavenPublication) {
+                    from components.java
+                    groupId = "org.opensearch.query"
+                    artifactId = fullArtifactId
+
+                    pom {
+                        name = fullArtifactId
+                        description = "OpenSearch unified query ${project.name} module"
+                        licenses {
+                            license {
+                                name = 'The Apache License, Version 2.0'
+                                url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                            }
+                        }
+                        developers {
+                            developer {
+                                name = 'OpenSearch'
+                                url = 'https://github.com/opensearch-project/sql'
+                            }
+                        }
+                    }
+                }
+            }
+
+            repositories {
+                maven {
+                    name = "Snapshots"
+                    url = "https://ci.opensearch.org/ci/dbc/snapshots/maven/"
+                    url = System.getenv("MAVEN_SNAPSHOTS_S3_REPO")
+                    credentials(AwsCredentials) {
+                        accessKey = System.getenv("AWS_ACCESS_KEY_ID")
+                        secretKey = System.getenv("AWS_SECRET_ACCESS_KEY")
+                        sessionToken = System.getenv("AWS_SESSION_TOKEN")
+                    }
+                }
+            }
+        }
+    }
+}
+
+// TODO: fix compiler warnings
+compileJava.options.warnings = false
+compileJava {
+    options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
+    doFirst {
+        // TODO: do not fail build on warnings, need to fix all compiler warnings
+        options.compilerArgs.remove('-Werror')
+        // TODO: need to fix all java doc format
+        options.compilerArgs.remove('-Xdoclint:all')
+    }
+}
+// TODO: Similarly, need to fix compiling errors in test source code
+compileTestJava.options.warnings = false
+compileTestJava {
+    options.compilerArgs.addAll(["-processor", 'lombok.launch.AnnotationProcessorHider$AnnotationProcessor'])
+    doFirst {
+        options.compilerArgs.remove('-Werror')
+        options.compilerArgs.remove('-Xdoclint:all')
+    }
+}
+
+jacoco {
+    toolVersion = "0.8.12"
+}
+jacocoTestReport {
+    reports {
+        xml.required = false
+        csv.required = false
+    }
+    afterEvaluate {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it,
+                    exclude: ['**/antlr/parser/**'])
+        }))
+    }
+}
+test.finalizedBy(project.tasks.jacocoTestReport)
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                minimum = 0.5
+            }
+
+        }
+    }
+    afterEvaluate {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it,
+                    exclude: ['**/antlr/parser/**'])
+        }))
+    }
+}
+check.dependsOn jacocoTestCoverageVerification
+
+
+configurations.all {
+    resolutionStrategy.force 'junit:junit:4.13.2'
+    exclude group: "commons-logging", module: "commons-logging"
+    // enforce 1.1.3, https://www.whitesourcesoftware.com/vulnerability-database/WS-2019-0379
+    resolutionStrategy.force "commons-codec:commons-codec:${commons_codec_version}"
+    resolutionStrategy.force "com.google.guava:guava:${guava_version}"
+}
+
+// updateVersion: Task to auto increment to the next development iteration
+task updateVersion {
+    onlyIf { System.getProperty('newVersion') }
+    doLast {
+        ext.newVersion = System.getProperty('newVersion')
+        println "Setting version to ${newVersion}."
+        // String tokenization to support -SNAPSHOT
+        ant.replaceregexp(file:'build.gradle', match: '"opensearch.version", "\\d.*"', replace: '"opensearch.version", "' + newVersion.tokenize('-')[0] + '-SNAPSHOT"', flags:'g', byline:true)
+        ant.replaceregexp(match:'"version": "\\d+.\\d+.\\d+.\\d+', replace:'"version": ' + '"' + newVersion.tokenize('-')[0] + '.0', flags:'g', byline:true) {
+            fileset(dir: projectDir) {
+                include(name: "workbench/package.json")
+                include(name: "workbench/opensearch_dashboards.json")
+            }
+        }
+        ant.replaceregexp(file:'workbench/opensearch_dashboards.json', match:'"opensearchDashboardsVersion": "\\d+.\\d+.\\d+', replace:'"opensearchDashboardsVersion": ' + '"' + newVersion.tokenize('-')[0], flags:'g', byline:true)
+    }
+}

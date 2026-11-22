@@ -1,0 +1,528 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+@file:Suppress("TooManyFunctions", "MatchingDeclarationName")
+@file:JvmName("ManagedIndexUtils")
+
+package org.opensearch.indexmanagement.indexstatemanagement.util
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.opensearch.action.delete.DeleteRequest
+import org.opensearch.action.get.GetRequest
+import org.opensearch.action.get.GetResponse
+import org.opensearch.action.index.IndexRequest
+import org.opensearch.action.search.SearchRequest
+import org.opensearch.action.support.WriteRequest
+import org.opensearch.action.update.UpdateRequest
+import org.opensearch.cluster.routing.Preference
+import org.opensearch.common.unit.TimeValue
+import org.opensearch.common.xcontent.LoggingDeprecationHandler
+import org.opensearch.common.xcontent.XContentFactory
+import org.opensearch.common.xcontent.XContentHelper
+import org.opensearch.common.xcontent.XContentType
+import org.opensearch.core.common.unit.ByteSizeValue
+import org.opensearch.core.xcontent.NamedXContentRegistry
+import org.opensearch.core.xcontent.ToXContent
+import org.opensearch.index.query.BoolQueryBuilder
+import org.opensearch.index.query.QueryBuilders
+import org.opensearch.indexmanagement.IndexManagementPlugin.Companion.INDEX_MANAGEMENT_INDEX
+import org.opensearch.indexmanagement.indexstatemanagement.ManagedIndexCoordinator
+import org.opensearch.indexmanagement.indexstatemanagement.action.DeleteAction
+import org.opensearch.indexmanagement.indexstatemanagement.action.RolloverAction
+import org.opensearch.indexmanagement.indexstatemanagement.action.TransitionsAction
+import org.opensearch.indexmanagement.indexstatemanagement.model.ChangePolicy
+import org.opensearch.indexmanagement.indexstatemanagement.model.Conditions
+import org.opensearch.indexmanagement.indexstatemanagement.model.ManagedIndexConfig
+import org.opensearch.indexmanagement.indexstatemanagement.model.Policy
+import org.opensearch.indexmanagement.indexstatemanagement.model.State
+import org.opensearch.indexmanagement.indexstatemanagement.model.Transition
+import org.opensearch.indexmanagement.indexstatemanagement.model.coordinator.SweptManagedIndexConfig
+import org.opensearch.indexmanagement.indexstatemanagement.settings.ManagedIndexSettings
+import org.opensearch.indexmanagement.opensearchapi.optionalTimeField
+import org.opensearch.indexmanagement.opensearchapi.parseWithType
+import org.opensearch.indexmanagement.opensearchapi.suspendUntil
+import org.opensearch.indexmanagement.spi.indexstatemanagement.Action
+import org.opensearch.indexmanagement.spi.indexstatemanagement.Step
+import org.opensearch.indexmanagement.spi.indexstatemanagement.model.ActionMetaData
+import org.opensearch.indexmanagement.spi.indexstatemanagement.model.ActionRetry
+import org.opensearch.indexmanagement.spi.indexstatemanagement.model.ManagedIndexMetaData
+import org.opensearch.indexmanagement.spi.indexstatemanagement.model.PolicyRetryInfoMetaData
+import org.opensearch.indexmanagement.spi.indexstatemanagement.model.StateMetaData
+import org.opensearch.jobscheduler.spi.schedule.IntervalSchedule
+import org.opensearch.search.builder.SearchSourceBuilder
+import org.opensearch.transport.client.Client
+import java.time.Instant
+import java.time.temporal.ChronoUnit
+
+@Suppress("LongParameterList")
+fun managedIndexConfigIndexRequest(
+    index: String,
+    uuid: String,
+    policyID: String,
+    jobInterval: Int,
+    policy: Policy,
+    jobJitter: Double?,
+): IndexRequest {
+    val managedIndexConfig =
+        ManagedIndexConfig(
+            jobName = index,
+            index = index,
+            indexUuid = uuid,
+            enabled = true,
+            jobSchedule = IntervalSchedule(Instant.now(), jobInterval, ChronoUnit.MINUTES),
+            jobLastUpdatedTime = Instant.now(),
+            jobEnabledTime = Instant.now(),
+            policyID = policyID,
+            policy = policy,
+            policySeqNo = policy.seqNo,
+            policyPrimaryTerm = policy.primaryTerm,
+            changePolicy = null,
+            jobJitter = jobJitter,
+        )
+
+    return IndexRequest(INDEX_MANAGEMENT_INDEX)
+        .id(uuid)
+        .create(true)
+        .routing(managedIndexConfig.indexUuid)
+        .source(managedIndexConfig.toXContent(XContentFactory.jsonBuilder(), ToXContent.EMPTY_PARAMS))
+}
+
+fun managedIndexConfigIndexRequest(managedIndexConfig: ManagedIndexConfig): IndexRequest = IndexRequest(INDEX_MANAGEMENT_INDEX)
+    .id(managedIndexConfig.indexUuid)
+    .setIfPrimaryTerm(managedIndexConfig.primaryTerm)
+    .setIfSeqNo(managedIndexConfig.seqNo)
+    .routing(managedIndexConfig.indexUuid) // we want job doc and its metadata doc be routed to same shard
+    .source(managedIndexConfig.toXContent(XContentFactory.jsonBuilder(), ToXContent.EMPTY_PARAMS))
+
+const val METADATA_POST_FIX = "#metadata"
+
+fun managedIndexMetadataID(indexUuid: String) =
+    indexUuid + METADATA_POST_FIX
+
+fun revertManagedIndexMetadataID(metadataID: String) =
+    metadataID.dropLast(METADATA_POST_FIX.length)
+
+fun managedIndexMetadataIndexRequest(managedIndexMetadata: ManagedIndexMetaData, waitRefresh: Boolean = true, create: Boolean = false): IndexRequest {
+    // routing set using managed index's uuid
+    // so that metadata doc and managed-index doc are in the same place
+    val req =
+        IndexRequest(INDEX_MANAGEMENT_INDEX)
+            .id(managedIndexMetadataID(managedIndexMetadata.indexUuid))
+            .setIfPrimaryTerm(managedIndexMetadata.primaryTerm)
+            .setIfSeqNo(managedIndexMetadata.seqNo)
+            .routing(managedIndexMetadata.indexUuid)
+            .create(create)
+            .source(managedIndexMetadata.toXContent(XContentFactory.jsonBuilder(), ToXContent.EMPTY_PARAMS, true))
+
+    if (waitRefresh) {
+        return req.setRefreshPolicy(WriteRequest.RefreshPolicy.WAIT_UNTIL)
+    }
+    return req
+}
+
+private fun updateEnabledField(uuid: String, enabled: Boolean, enabledTime: Long?): UpdateRequest {
+    val builder =
+        XContentFactory.jsonBuilder()
+            .startObject()
+            .startObject(ManagedIndexConfig.MANAGED_INDEX_TYPE)
+            .optionalTimeField(ManagedIndexConfig.LAST_UPDATED_TIME_FIELD, Instant.now())
+            .field(ManagedIndexConfig.ENABLED_FIELD, enabled)
+            .field(ManagedIndexConfig.ENABLED_TIME_FIELD, enabledTime)
+            .endObject()
+            .endObject()
+    return UpdateRequest(INDEX_MANAGEMENT_INDEX, uuid).doc(builder)
+}
+
+fun updateDisableManagedIndexRequest(uuid: String): UpdateRequest = updateEnabledField(uuid, false, null)
+
+fun updateEnableManagedIndexRequest(uuid: String): UpdateRequest = updateEnabledField(uuid, true, Instant.now().toEpochMilli())
+
+fun deleteManagedIndexRequest(uuid: String): DeleteRequest = DeleteRequest(INDEX_MANAGEMENT_INDEX, uuid)
+
+fun deleteManagedIndexMetadataRequest(uuid: String): DeleteRequest = DeleteRequest(INDEX_MANAGEMENT_INDEX, managedIndexMetadataID(uuid)).routing(uuid)
+
+fun updateManagedIndexRequest(
+    sweptManagedIndexConfig: SweptManagedIndexConfig,
+): UpdateRequest = UpdateRequest(INDEX_MANAGEMENT_INDEX, sweptManagedIndexConfig.uuid)
+    .setIfPrimaryTerm(sweptManagedIndexConfig.primaryTerm)
+    .setIfSeqNo(sweptManagedIndexConfig.seqNo)
+    .doc(getPartialChangePolicyBuilder(sweptManagedIndexConfig.changePolicy))
+
+/**
+ * Finds ManagedIndices that exist in [INDEX_MANAGEMENT_INDEX] that do not exist in the cluster state
+ * anymore which means we need to delete the [ManagedIndexConfig].
+ *
+ * @param currentIndexUuids List of current index uuids in cluster.
+ * @param currentManagedIndexUuids List of current managed index uuids in cluster.
+ * @return list of managedIndexUuids to delete.
+ */
+fun getManagedIndicesToDelete(
+    currentIndexUuids: List<String>,
+    currentManagedIndexUuids: List<String>,
+): List<String> = currentManagedIndexUuids.filter { currentManagedIndex ->
+    !currentIndexUuids.contains(currentManagedIndex)
+}
+
+fun getSweptManagedIndexSearchRequest(scroll: Boolean = false, size: Int = ManagedIndexCoordinator.MAX_HITS): SearchRequest {
+    val boolQueryBuilder = BoolQueryBuilder().filter(QueryBuilders.existsQuery(ManagedIndexConfig.MANAGED_INDEX_TYPE))
+    val req =
+        SearchRequest().indices(INDEX_MANAGEMENT_INDEX)
+            .allowPartialSearchResults(false)
+            .source(
+                SearchSourceBuilder.searchSource()
+                    .size(size)
+                    .seqNoAndPrimaryTerm(true)
+                    .fetchSource(emptyArray(), emptyArray())
+                    .query(boolQueryBuilder),
+            )
+            .preference(Preference.PRIMARY_FIRST.type())
+    if (scroll) req.scroll(TimeValue.timeValueMinutes(1))
+    return req
+}
+
+@Suppress("ReturnCount", "ComplexCondition", "LongParameterList")
+data class TransitionConditionContext(
+    val indexCreationDate: Instant,
+    val numDocs: Long?,
+    val indexSize: ByteSizeValue?,
+    val transitionStartTime: Instant,
+    val rolloverDate: Instant?,
+    val indexAliasesCount: Int? = null,
+    val stateStartTime: Instant? = null,
+)
+
+@Suppress("ReturnCount")
+fun Transition.evaluateConditions(
+    context: TransitionConditionContext,
+): Boolean {
+    val conditions = this.conditions ?: return true
+    if (checkDocCount(conditions, context)) return true
+    if (checkIndexAge(conditions, context)) return true
+    if (checkSize(conditions, context)) return true
+    if (checkCron(conditions, context)) return true
+    if (checkRolloverAge(conditions, context)) return true
+    if (checkNoAlias(conditions, context)) return true
+    if (checkMinStateAge(conditions, context)) return true
+    return false
+}
+
+private fun checkDocCount(conditions: Conditions, context: TransitionConditionContext): Boolean =
+    conditions.docCount != null &&
+        context.numDocs != null &&
+        conditions.docCount <= context.numDocs
+
+@Suppress("ReturnCount")
+private fun checkIndexAge(conditions: Conditions, context: TransitionConditionContext): Boolean {
+    if (conditions.indexAge != null) {
+        val indexCreationDateMilli = context.indexCreationDate.toEpochMilli()
+        if (indexCreationDateMilli == -1L) return false
+        val elapsedTime = Instant.now().toEpochMilli() - indexCreationDateMilli
+        return conditions.indexAge.millis <= elapsedTime
+    }
+    return false
+}
+
+private fun checkSize(conditions: Conditions, context: TransitionConditionContext): Boolean =
+    conditions.size != null &&
+        context.indexSize != null &&
+        conditions.size <= context.indexSize
+
+private fun checkCron(conditions: Conditions, context: TransitionConditionContext): Boolean {
+    if (conditions.cron != null) {
+        return conditions.cron.getNextExecutionTime(context.transitionStartTime) <= Instant.now()
+    }
+    return false
+}
+
+@Suppress("ReturnCount")
+private fun checkRolloverAge(conditions: Conditions, context: TransitionConditionContext): Boolean {
+    if (conditions.rolloverAge != null) {
+        val rolloverDateMilli = context.rolloverDate?.toEpochMilli() ?: return false
+        val elapsedTime = Instant.now().toEpochMilli() - rolloverDateMilli
+        return conditions.rolloverAge.millis <= elapsedTime
+    }
+    return false
+}
+
+private fun checkNoAlias(conditions: Conditions, context: TransitionConditionContext): Boolean =
+    conditions.noAlias != null &&
+        context.indexAliasesCount != null &&
+        (
+            (conditions.noAlias && context.indexAliasesCount == 0) ||
+                (!conditions.noAlias && context.indexAliasesCount > 0)
+            )
+
+private fun checkMinStateAge(conditions: Conditions, context: TransitionConditionContext): Boolean =
+    conditions.minStateAge != null &&
+        context.stateStartTime != null &&
+        (System.currentTimeMillis() - context.stateStartTime.toEpochMilli() >= conditions.minStateAge.millis)
+
+fun Transition.hasStatsConditions(): Boolean = this.conditions?.docCount != null || this.conditions?.size != null
+
+/**
+ * Computes the satisfaction result for each *specified* (non-null) rollover condition.
+ *
+ * The four comparison expressions are kept byte-identical to the historical flat evaluation so that
+ * flat OR behavior is provably unchanged. Only specified conditions contribute to the returned list.
+ */
+private fun rolloverConditionResults(
+    minSize: ByteSizeValue?,
+    minDocs: Long?,
+    minAge: TimeValue?,
+    minPrimaryShardSize: ByteSizeValue?,
+    indexAgeTimeValue: TimeValue,
+    numDocs: Long,
+    indexSize: ByteSizeValue,
+    primaryShardSize: ByteSizeValue,
+): List<Boolean> = buildList {
+    if (minDocs != null) add(minDocs <= numDocs)
+    if (minAge != null) add(minAge.millis <= indexAgeTimeValue.millis)
+    if (minSize != null) add(minSize <= indexSize)
+    if (minPrimaryShardSize != null) add(minPrimaryShardSize <= primaryShardSize)
+}
+
+@Suppress("ReturnCount", "ComplexCondition")
+fun RolloverAction.evaluateConditions(
+    indexAgeTimeValue: TimeValue,
+    numDocs: Long,
+    indexSize: ByteSizeValue,
+    primaryShardSize: ByteSizeValue,
+): Boolean {
+    val groups = this.conditionGroups
+    if (!groups.isNullOrEmpty()) {
+        return groups.any { group ->
+            val results =
+                rolloverConditionResults(
+                    group.minSize, group.minDocs, group.minAge, group.minPrimaryShardSize,
+                    indexAgeTimeValue, numDocs, indexSize, primaryShardSize,
+                )
+            results.all { it }
+        }
+    }
+
+    val results =
+        rolloverConditionResults(
+            this.minSize, this.minDocs, this.minAge, this.minPrimaryShardSize,
+            indexAgeTimeValue, numDocs, indexSize, primaryShardSize,
+        )
+    if (results.isEmpty()) return true
+    return results.any { it }
+}
+
+fun State.getUpdatedStateMetaData(managedIndexMetaData: ManagedIndexMetaData): StateMetaData {
+    // If the current ManagedIndexMetaData state does not match this state, it means we transitioned and need to update the startStartTime
+    val stateMetaData = managedIndexMetaData.stateMetaData
+    return when {
+        stateMetaData == null -> StateMetaData(this.name, Instant.now().toEpochMilli())
+        stateMetaData.name != this.name -> StateMetaData(this.name, Instant.now().toEpochMilli())
+        else -> stateMetaData
+    }
+}
+
+fun Action.shouldBackoff(actionMetaData: ActionMetaData?, actionRetry: ActionRetry?): Pair<Boolean, Long?>? =
+    this.configRetry?.backoff?.shouldBackoff(actionMetaData, actionRetry)
+
+@Suppress("ReturnCount")
+fun Action.hasTimedOut(actionMetaData: ActionMetaData?): Boolean {
+    val startTime = actionMetaData?.startTime
+    val configTimeout = this.configTimeout
+    if (startTime == null || configTimeout == null) return false
+    return (Instant.now().toEpochMilli() - startTime) > configTimeout.timeout.millis
+}
+
+@Suppress("ReturnCount")
+fun ManagedIndexMetaData.getStartingManagedIndexMetaData(
+    state: State?,
+    action: Action?,
+    step: Step?,
+): ManagedIndexMetaData {
+    // State can be null if the transition_to state or the current metadata state is not found in the policy
+    if (state == null) {
+        return this.copy(
+            policyRetryInfo = PolicyRetryInfoMetaData(true, 0),
+            info = mapOf("message" to "Failed to find state=${this.transitionTo ?: this.stateMetaData} in policy=${this.policyID}"),
+        )
+    }
+
+    // Action can only be null if the metadata action type/actionIndex do not match in state.actions
+    // Step can only be null if Action is null
+    if (action == null || step == null) {
+        return this.copy(
+            policyRetryInfo = PolicyRetryInfoMetaData(true, 0),
+            info = mapOf("message" to "Failed to find action=${this.actionMetaData} in state=${this.stateMetaData}"),
+        )
+    }
+
+    val updatedStateMetaData = state.getUpdatedStateMetaData(this)
+    val updatedActionMetaData = action.getUpdatedActionMetadata(this, state.name)
+    val updatedStepMetaData = step.getStartingStepMetaData(this)
+
+    return this.copy(
+        stateMetaData = updatedStateMetaData,
+        actionMetaData = updatedActionMetaData,
+        stepMetaData = updatedStepMetaData,
+        info = mapOf("message" to "Starting action ${action.type} and working on ${step.name}"),
+    )
+}
+
+@Suppress("ReturnCount")
+fun ManagedIndexMetaData.getCompletedManagedIndexMetaData(
+    action: Action,
+    step: Step,
+): ManagedIndexMetaData {
+    val updatedStepMetaData = step.getUpdatedManagedIndexMetadata(this)
+    val actionMetaData =
+        updatedStepMetaData.actionMetaData ?: return this.copy(
+            policyRetryInfo = PolicyRetryInfoMetaData(true, 0),
+            info = mapOf("message" to "Failed due to ActionMetaData being null"),
+        )
+
+    val updatedActionMetaData =
+        if (updatedStepMetaData.stepMetaData?.stepStatus == Step.StepStatus.FAILED) {
+            when {
+                action.configRetry == null -> actionMetaData.copy(failed = true)
+
+                actionMetaData.consumedRetries >= action.configRetry!!.count -> actionMetaData.copy(failed = true)
+
+                else ->
+                    actionMetaData.copy(
+                        failed = false,
+                        consumedRetries = actionMetaData.consumedRetries + 1,
+                        lastRetryTime = Instant.now().toEpochMilli(),
+                    )
+            }
+        } else {
+            actionMetaData
+        }
+
+    return this.copy(
+        policyCompleted = updatedStepMetaData.policyCompleted,
+        rolledOver = updatedStepMetaData.rolledOver,
+        rolledOverIndexName = updatedStepMetaData.rolledOverIndexName,
+        actionMetaData = updatedActionMetaData,
+        stepMetaData = updatedStepMetaData.stepMetaData,
+        transitionTo = updatedStepMetaData.transitionTo,
+        policyRetryInfo = updatedStepMetaData.policyRetryInfo,
+        info = updatedStepMetaData.info,
+    )
+}
+
+val ManagedIndexMetaData.isSuccessfulDelete: Boolean
+    get() =
+        (this.actionMetaData?.name == DeleteAction.name && !this.actionMetaData!!.failed) &&
+            (this.stepMetaData?.name == DeleteAction.name && this.stepMetaData!!.stepStatus == Step.StepStatus.COMPLETED) &&
+            (this.policyRetryInfo?.failed != true)
+
+val ManagedIndexMetaData.isFailed: Boolean
+    get() {
+        // If PolicyRetryInfo is failed then the ManagedIndex has failed.
+        if (this.policyRetryInfo?.failed == true) return true
+        // If ActionMetaData is not null and some action is failed. Then the ManagedIndex has failed.
+        if (this.actionMetaData?.failed == true) return true
+        return false
+    }
+
+// Adding predicate extension to allow cleaner checks since policyCompleted is nullable
+val ManagedIndexMetaData.isPolicyCompleted: Boolean
+    get() = this.policyCompleted == true
+
+/**
+ * We will change the policy if a change policy exists and if we are currently in a Transitions action
+ * which means we're safely at the end of a state.
+ *
+ * If the next action is Transition or if the rest API determined it was "safe", meaning the new policy has the same structure
+ * of the current state, it should be safe to immediately change (even in the middle of the state).
+ *
+ * @return {@code true} if we should change policy, {@code false} if not
+ */
+@Suppress("ReturnCount")
+fun ManagedIndexConfig.shouldChangePolicy(actionToExecute: Action?): Boolean {
+    if (this.changePolicy == null) {
+        return false
+    }
+
+    if (this.changePolicy.isSafe) {
+        return true
+    }
+
+    return actionToExecute?.type == TransitionsAction.name
+}
+
+fun ManagedIndexMetaData.hasDifferentPolicyVersion(managedIndexConfig: ManagedIndexConfig): Boolean =
+    this.policySeqNo != managedIndexConfig.policySeqNo || this.policyPrimaryTerm != managedIndexConfig.policyPrimaryTerm
+
+fun ManagedIndexConfig.hasDifferentJobInterval(jobInterval: Int): Boolean {
+    when (val schedule = this.schedule) {
+        is IntervalSchedule -> {
+            return schedule.interval != jobInterval
+        }
+    }
+    return false
+}
+
+/**
+ * A policy is safe to change to a new policy when
+ * both policies have the current state the [ManagedIndexConfig] is in and that state has the same actions in the same order.
+ * This allows simple things like configuration updates to happen which won't break the execution/contract
+ * between [ManagedIndexMetaData] and [ManagedIndexConfig] as the metadata only knows about the current state.
+ *
+ * If the ChangePolicy contains a state to transition to, we don't consider it's safe to change here
+ * as this may transition a user into a different state from the middle of the current state.
+ *
+ * @param stateName the name of the state the [ManagedIndexConfig] is currently in
+ * @param newPolicy the new (actual data model) policy we will eventually try to change to
+ * @param changePolicy the change policy to change to
+ * @return if it's safe to change
+ */
+@Suppress("ReturnCount")
+fun Policy.isSafeToChange(stateName: String?, newPolicy: Policy, changePolicy: ChangePolicy): Boolean {
+    // if stateName is null it means we either have not initialized the job
+    // or we failed to load the initial policy, both cases its safe to change the policy
+    if (stateName == null) return true
+    if (changePolicy.state != null) return false
+
+    val currentState = this.states.find { it.name == stateName }
+    val newState = newPolicy.states.find { it.name == stateName }
+    if (currentState == null || newState == null) {
+        return false
+    }
+    if (currentState.actions.size != newState.actions.size) {
+        return false
+    }
+    currentState.actions.forEachIndexed { index, action ->
+        val newStateAction = newState.actions[index]
+        if (action.type != newStateAction.type) return@isSafeToChange false
+    }
+
+    return true
+}
+
+/**
+ * Allowed actions are ones that are specified in the [ManagedIndexSettings.ALLOW_LIST] setting.
+ */
+fun Action.isAllowed(allowList: List<String>): Boolean = allowList.contains(this.type)
+
+@Suppress("BlockingMethodInNonBlockingContext")
+suspend fun getManagedIndexConfig(indexUuid: String, client: Client): ManagedIndexConfig? {
+    val request = GetRequest().routing(indexUuid).index(INDEX_MANAGEMENT_INDEX).id(indexUuid)
+    val response: GetResponse = client.suspendUntil { get(request, it) }
+    var managedIndexConfig: ManagedIndexConfig? = null
+    val configSource = response.sourceAsBytesRef
+    // Intellij complains about createParser/parseWithType blocking because it sees they throw IOExceptions
+    configSource?.let {
+        withContext(Dispatchers.IO) {
+            val xcp = XContentHelper.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, configSource, XContentType.JSON)
+            managedIndexConfig = xcp.parseWithType(response.id, response.seqNo, response.primaryTerm, ManagedIndexConfig.Companion::parse)
+        }
+    }
+    return managedIndexConfig
+}
+
+// extracts the job scheduler interval from the managed index config and returns the millisecond value
+fun getIntervalFromManagedIndexConfig(managedIndexConfig: ManagedIndexConfig): Long {
+    val periodTuple = managedIndexConfig.jobSchedule.getPeriodStartingAt(Instant.now())
+    return periodTuple.v2().toEpochMilli() - periodTuple.v1().toEpochMilli()
+}

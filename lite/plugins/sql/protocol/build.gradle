@@ -1,0 +1,114 @@
+/*
+ * Copyright OpenSearch Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Licensed to Elasticsearch under one or more contributor
+ * license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright
+ * ownership. Elasticsearch licenses this file to you under
+ * the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+plugins {
+    id 'java'
+    id "io.freefair.lombok"
+    id 'jacoco'
+    id 'com.diffplug.spotless'
+}
+
+dependencies {
+    implementation group: 'com.google.guava', name: 'guava', version: "${guava_version}"
+    implementation group: 'tools.jackson.core', name: 'jackson-core', version: "${versions.jackson3}"
+    implementation group: 'tools.jackson.core', name: 'jackson-databind', version: "${versions.jackson3_databind}"
+    implementation group: 'tools.jackson.dataformat', name: 'jackson-dataformat-cbor', version: "${versions.jackson3}"
+    implementation 'com.google.code.gson:gson:2.8.9'
+    implementation project(':core')
+    implementation project(':opensearch')
+
+    testImplementation('org.junit.jupiter:junit-jupiter:5.9.3')
+    testImplementation group: 'org.hamcrest', name: 'hamcrest-library', version: "${hamcrest_version}"
+    testImplementation group: 'org.mockito', name: 'mockito-core', version: "${mockito_version}"
+    testImplementation group: 'org.mockito', name: 'mockito-junit-jupiter', version: "${mockito_version}"
+    testRuntimeOnly('org.junit.platform:junit-platform-launcher')
+}
+
+configurations.all {
+    resolutionStrategy.force "tools.jackson.core:jackson-databind:${versions.jackson3_databind}"
+}
+
+test {
+    maxParallelForks = Runtime.runtime.availableProcessors()
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+}
+
+
+
+jacocoTestReport {
+    reports {
+        html.required = true
+        xml.required = true
+    }
+    afterEvaluate {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it)
+        }))
+    }
+}
+test.finalizedBy(project.tasks.jacocoTestReport)
+
+spotless {
+    java {
+        target fileTree('.') {
+            include '**/*.java'
+            exclude '**/build/**', '**/build-*/**'
+        }
+        importOrder()
+        licenseHeader("/*\n" +
+                " * Copyright OpenSearch Contributors\n" +
+                " * SPDX-License-Identifier: Apache-2.0\n" +
+                " */\n\n")
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+        googleJavaFormat('1.32.0').reflowLongStrings().groupArtifact('com.google.googlejavaformat:google-java-format')
+    }
+}
+
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                minimum = 1.0
+            }
+            limit {
+                counter = 'BRANCH'
+                minimum = 1.0
+            }
+        }
+    }
+    afterEvaluate {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it)
+        }))
+    }
+}
+check.dependsOn jacocoTestCoverageVerification
+jacocoTestCoverageVerification.dependsOn jacocoTestReport
