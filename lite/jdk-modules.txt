@@ -1,0 +1,37 @@
+# Java modules linked into the runtime that ships inside OpenSearch Lite.
+#
+# lite/build.sh runs jdeps over every jar of the distribution and adds what it
+# finds to this list. The modules below are the ones jdeps cannot see, because
+# they are named on the JVM command line, loaded as service providers, or are
+# tools an operator runs by hand.
+
+# Named in config/jvm.options: -javaagent, --add-modules=jdk.incubator.vector.
+java.instrument
+jdk.incubator.vector
+
+# Reached through reflection or internal APIs by OpenSearch, Lucene and Netty.
+jdk.unsupported
+jdk.management
+jdk.net
+jdk.zipfs
+jdk.attach
+
+# Service providers the JDK loads on demand: locale data for date formats in
+# languages other than English, and the less common character sets.
+jdk.localedata
+jdk.charsets
+
+# For operators: Flight Recorder, JMX, and jcmd / jstack / jmap inside the container.
+jdk.jfr
+jdk.management.agent
+jdk.jcmd
+
+# Always wanted, listed so the runtime does not depend on jdeps finding them.
+java.base
+java.logging
+java.management
+java.naming
+java.net.http
+java.scripting
+java.sql
+java.xml

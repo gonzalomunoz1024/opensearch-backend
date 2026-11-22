@@ -1,0 +1,102 @@
+# OpenSearch Lite has no login and no TLS. See networkPolicy at the end of this file
+# before installing: it is what keeps the rest of the cluster away from port 9200.
+
+image:
+  # Where your pipeline pushes the image built from lite/Dockerfile.
+  repository: opensearch-lite
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Name of the Service and StatefulSet. The frontend's default backend address is
+# http://opensearch-lite:9200, so only change this for a second install in one namespace.
+fullnameOverride: ""
+
+# 1 = a single node. More than 1 forms a cluster from the StatefulSet's pods; use 3 or
+# more so one node can be lost.
+replicas: 1
+
+clusterName: opensearch-lite
+
+# Java heap. Keep it at about half of resources.limits.memory; the other half is for
+# Lucene's file cache.
+heap: 1g
+# Extra JVM options, appended after the heap size.
+javaOpts: ""
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    memory: 2Gi
+
+persistence:
+  # false keeps the data in an emptyDir, lost when the pod is deleted.
+  enabled: true
+  size: 20Gi
+  # Empty = the cluster's default storage class.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+# Memory-mapped index files. They are faster, but a cluster of several nodes then
+# refuses to start unless every worker node has vm.max_map_count >= 262144, which
+# takes a cluster administrator. Left empty, the chart decides: on for one node
+# (which does not check the limit), off for several. Set true once your administrators
+# confirm the limit, or false for a single node that holds hundreds of shards.
+allowMmap:
+
+# Any other OpenSearch setting, as name: value. These win over the chart's own.
+#   settings:
+#     indices.query.bool.max_clause_count: "4096"
+#     action.auto_create_index: "false"
+settings: {}
+
+# Extra environment variables for the container, in Kubernetes form.
+extraEnv: []
+# Extra volumes and mounts, for example a ConfigMap with your own opensearch.yml.
+extraVolumes: []
+extraVolumeMounts: []
+
+service:
+  type: ClusterIP
+  port: 9200
+  annotations: {}
+
+# These defaults fit OpenShift's restricted-v2 policy and the Kubernetes "restricted"
+# pod security standard: no root, no added capabilities, no privilege escalation, a
+# read-only root filesystem. The user ID is left to the platform (OpenShift assigns
+# one from the namespace's range; the image also runs as UID 1000 on its own).
+# On plain Kubernetes add fsGroup: 1000 so the data volume is writable.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+terminationGracePeriodSeconds: 120
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+# Empty = with several nodes, prefer to spread them over different worker nodes.
+affinity: {}
+
+# The only boundary around OpenSearch Lite. With it, port 9200 accepts traffic only
+# from the pods matched in allowFrom, and port 9300 only from other OpenSearch Lite
+# pods of this install. Disable it only if your namespace is already closed off some
+# other way, or if you are not allowed to create NetworkPolicies.
+networkPolicy:
+  enabled: true
+  # Standard NetworkPolicy peers. The default admits the InfraDashboard frontend.
+  allowFrom:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: infradashboard

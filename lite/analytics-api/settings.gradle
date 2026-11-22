@@ -1,0 +1,3 @@
+// Stand-alone build of OpenSearch's sandbox library analytics-api, which the SQL
+// plugin compiles against. See build.gradle.
+rootProject.name = 'analytics-api'

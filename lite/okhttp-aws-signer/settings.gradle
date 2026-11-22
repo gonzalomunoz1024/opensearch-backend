@@ -1,0 +1,2 @@
+// Stand-alone build of okhttp-aws-signer 1.0.2; see build.gradle.
+rootProject.name = 'okhttp-aws-signer'

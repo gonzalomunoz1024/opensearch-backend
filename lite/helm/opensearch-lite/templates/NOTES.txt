@@ -1,0 +1,15 @@
+OpenSearch Lite is starting. Inside the namespace it answers at
+
+  http://{{ include "osl.fullname" . }}:{{ .Values.service.port }}
+
+It has no login and no TLS. Do not give it a Route or an Ingress.
+{{- if .Values.networkPolicy.enabled }}
+Port 9200 accepts traffic only from the pods matched by networkPolicy.allowFrom.
+{{- else }}
+The NetworkPolicy is DISABLED: every pod that can reach this namespace can read and
+delete all data.
+{{- end }}
+
+Check it from a pod that is allowed in:
+
+  curl http://{{ include "osl.fullname" . }}:{{ .Values.service.port }}/_cluster/health?pretty

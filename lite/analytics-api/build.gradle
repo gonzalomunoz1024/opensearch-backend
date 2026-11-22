@@ -1,0 +1,47 @@
+/*
+ * The SQL plugin 3.9.0.0 depends on org.opensearch.sandbox:analytics-api:3.9.0-SNAPSHOT,
+ * a library from this repository's sandbox/ folder that upstream only publishes to its
+ * own snapshot repository. Upstream's sandbox build also wants a patched Calcite from
+ * that repository. This build compiles the same sources (sandbox/libs/analytics-api)
+ * against the OpenSearch 3.9.0 jars built here and the stock Calcite the SQL plugin
+ * ships, and installs the result in the local Maven repository for the SQL build.
+ */
+plugins {
+  id 'java-library'
+  id 'maven-publish'
+}
+
+group = 'org.opensearch.sandbox'
+version = System.getProperty('opensearch.version', '3.9.0') + '-SNAPSHOT'
+
+def calciteVersion = System.getProperty('calcite.version', '1.42.0')
+def opensearchVersion = System.getProperty('opensearch.version', '3.9.0')
+
+java {
+  sourceCompatibility = JavaVersion.VERSION_21
+  targetCompatibility = JavaVersion.VERSION_21
+}
+
+repositories {
+  mavenLocal()
+  mavenCentral()
+}
+
+sourceSets.main.java.srcDirs = ["${rootDir}/../../sandbox/libs/analytics-api/src/main/java"]
+
+dependencies {
+  compileOnly "org.opensearch:opensearch:${opensearchVersion}"
+  compileOnly "org.apache.calcite:calcite-core:${calciteVersion}"
+  compileOnly "org.apache.calcite:calcite-linq4j:${calciteVersion}"
+  compileOnlyApi 'org.apiguardian:apiguardian-api:1.1.2'
+  compileOnlyApi 'org.checkerframework:checker-qual:3.43.0'
+}
+
+publishing {
+  publications {
+    maven(MavenPublication) {
+      artifactId = 'analytics-api'
+      from components.java
+    }
+  }
+}

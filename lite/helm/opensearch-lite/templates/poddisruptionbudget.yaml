@@ -1,0 +1,12 @@
+{{- if gt (int .Values.replicas) 1 }}
+# Node drains take one OpenSearch node at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "osl.fullname" . }}
+  labels: {{- include "osl.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {{- include "osl.selectorLabels" . | nindent 6 }}
+{{- end }}

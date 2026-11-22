@@ -29,3 +29,6 @@ does not read them.
 
 To update to a new release, replace each folder with `git archive` of the new tag and
 apply the changes above again.
+
+`.gitattributes` in this folder switches off line-ending conversion for these trees, so
+every file stays byte for byte what upstream has.
