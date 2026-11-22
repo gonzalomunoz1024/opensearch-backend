@@ -14,9 +14,11 @@
 
 name: OpenSearch Lite
 
+# Pull requests build and test; main and lite-* tags also publish. Other branches build
+# once they have a pull request, or on request from the Actions tab.
 on:
   push:
-    branches: ['**']
+    branches: [main]
     tags: ['lite-*']
   pull_request:
   workflow_dispatch:
